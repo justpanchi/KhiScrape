@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import random
 import re
 import sys
 import time
@@ -44,6 +45,7 @@ class Config:
     read_timeout: float = 60.0
     max_retries: int = 3
     rate_limit: float = 2.0  # requests per second
+    jitter_percent: float = 70.0  # Jitter as percentage of base delay
     invalid_chars_pattern: str = r'[\\/*?:"<>|]'
     invalid_chars_replacement: str = "_"
     user_agent: str = (
@@ -69,21 +71,29 @@ class TrackInfo:
 
 
 class RateLimiter:
-    """Global rate limiter for all HTTP requests."""
+    """Global rate limiter for all HTTP requests with jitter support."""
 
-    def __init__(self, rate: float) -> None:
+    def __init__(self, rate: float, jitter_percent: float = 70.0) -> None:
         self.rate = rate
-        self.delay = 1.0 / rate
+        self.base_delay = 1.0 / rate
+        self.jitter_percent = jitter_percent
+        self.max_delay = self.base_delay * (1 + jitter_percent / 100.0)
         self.last_request_time = 0.0
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        """Acquire permission to make a request, respecting rate limit."""
+        """Acquire permission to make a request, respecting rate limit with jitter."""
         async with self._lock:
             current_time = time.monotonic()
             time_since_last = current_time - self.last_request_time
-            if time_since_last < self.delay:
-                await asyncio.sleep(self.delay - time_since_last)
+
+            # Calculate required delay with jitter
+            required_delay = random.uniform(self.base_delay, self.max_delay)
+
+            # Always wait if we haven't reached the required delay
+            if time_since_last < required_delay:
+                await asyncio.sleep(required_delay - time_since_last)
+
             self.last_request_time = time.monotonic()
 
 
@@ -92,7 +102,7 @@ class KhinsiderDownloader:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.rate_limiter = RateLimiter(config.rate_limit)
+        self.rate_limiter = RateLimiter(config.rate_limit, config.jitter_percent)
         self.semaphore = asyncio.Semaphore(config.max_concurrency)
 
         self.timeout = ClientTimeout(
@@ -671,6 +681,9 @@ class KhinsiderDownloader:
         self, album_name: str, album_dir: Path, track_count: int, padding: int
     ) -> None:
         """Display album information and configuration."""
+        base_delay_ms = (1.0 / self.config.rate_limit) * 1000
+        max_delay_ms = base_delay_ms * (1 + self.config.jitter_percent / 100.0)
+
         print(f"\n{Fore.GREEN}{'='*60}")
         print(f"{Fore.CYAN}ALBUM INFORMATION")
         print(f"{Fore.GREEN}{'='*60}")
@@ -685,6 +698,10 @@ class KhinsiderDownloader:
             f"{Fore.WHITE}Concurrent Downloads: {Fore.CYAN}{self.config.max_concurrency}"
         )
         print(f"{Fore.WHITE}Rate Limit: {Fore.CYAN}{self.config.rate_limit} RPS")
+        print(f"{Fore.WHITE}Jitter: {Fore.CYAN}{self.config.jitter_percent}%")
+        print(
+            f"{Fore.WHITE}Request Delay: {Fore.CYAN}{base_delay_ms:.0f}-{max_delay_ms:.0f} ms"
+        )
         print(
             f"{Fore.WHITE}Preferred Formats: {Fore.CYAN}{', '.join(self.config.preferred_formats)}"
         )
@@ -719,6 +736,7 @@ Examples:
   %(prog)s https://downloads.khinsider.com/game-soundtracks/album/mario-kart-8-full-gamerip
   %(prog)s --concurrency 8 --rate-limit 4 url1 url2 url3
   %(prog)s --output "$HOME/Music" --formats flac,mp3 url1 url2
+  %(prog)s --jitter 50 --rate-limit 2 url1  # 2 RPS with 50%% jitter (500-750ms delays)
         """,
     )
 
@@ -746,6 +764,14 @@ Examples:
         type=float,
         default=Config.rate_limit,
         help=f"Global rate limit in requests per second (default: {Config.rate_limit})",
+    )
+
+    parser.add_argument(
+        "-j",
+        "--jitter",
+        type=float,
+        default=Config.jitter_percent,
+        help=f"Jitter as percentage of base delay (default: {Config.jitter_percent}%%)",
     )
 
     parser.add_argument(
@@ -790,6 +816,7 @@ Examples:
         output_path=args.output,
         max_concurrency=args.concurrency,
         rate_limit=args.rate_limit,
+        jitter_percent=args.jitter,
         preferred_formats=tuple(args.formats),
         chunk_size=args.chunk_size if args.chunk_size != 0 else None,
         max_retries=args.max_retries,
@@ -803,6 +830,10 @@ Examples:
 
     if config.rate_limit <= 0:
         print(f"{Fore.RED}Error: Rate limit must be positive")
+        sys.exit(1)
+
+    if config.jitter_percent < 0 or config.jitter_percent > 100:
+        print(f"{Fore.RED}Error: Jitter must be between 0 and 100")
         sys.exit(1)
 
     downloader = KhinsiderDownloader(config)
