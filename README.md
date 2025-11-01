@@ -7,6 +7,7 @@ Fetches all tracks from given album URLs, selects the best available format, and
 - `-o, --output PATH`: Output directory (default: KhiScrape)
 - `-c, --concurrency NUM`: Concurrent downloads (default: 4)
 - `-r, --rate-limit RPS`: Requests per second (default: 2.0)
+- `-j, --jitter JITTER`: Jitter as percentage of base delay (default: 70%)
 - `-f, --formats LIST`: Preferred formats (default: flac,wav,m4a,opus,ogg,aac,mp3)
 - `-s, --chunk-size BYTES`: Chunk size, 0 for single write (default: 524288 / 512 KB)
 - `-m, --max-retries NUM`: Retry attempts (default: 3)
