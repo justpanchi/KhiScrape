@@ -55,6 +55,7 @@ class Config:
     base_referer: str = "https://downloads.khinsider.com/"
     debug: bool = False
     track_padding: Optional[int] = None  # None = auto-detect
+    padding_mode: str = "disc"  # "disc" or "total"
 
 
 @dataclass
@@ -165,19 +166,73 @@ class KhinsiderDownloader:
                     )
                     return None
 
-    def _calculate_track_padding(self, total_tracks: int) -> int:
-        """Calculate automatic track number padding based on total tracks."""
-        if self.config.track_padding is not None:
-            return self.config.track_padding
+    def _is_multi_disc(self, tracks: List[TrackInfo]) -> bool:
+        """Check if album has multiple discs."""
+        disc_numbers = {
+            track.disc_number for track in tracks if track.disc_number is not None
+        }
+        return len(disc_numbers) > 1
 
-        if total_tracks < 10:
-            return 1  # "1", "2", etc.
-        elif total_tracks < 100:
-            return 2  # "01", "02", etc.
-        elif total_tracks < 1000:
-            return 3  # "001", "002", etc.
+    def _calculate_track_padding(
+        self, tracks: List[TrackInfo]
+    ) -> Dict[Optional[int], int]:
+        """Calculate track number padding per disc based on padding mode and track data."""
+        if self.config.track_padding is not None:
+            # Manual padding overrides everything
+            return {None: self.config.track_padding}
+
+        is_multi_disc = self._is_multi_disc(tracks)
+
+        if not is_multi_disc:
+            # Single disc: use total track count
+            total_tracks = len(tracks)
+            if total_tracks < 10:
+                return {None: 1}
+            elif total_tracks < 100:
+                return {None: 2}
+            elif total_tracks < 1000:
+                return {None: 3}
+            else:
+                return {None: 4}
+
+        if self.config.padding_mode == "total":
+            # Total padding: use maximum track number across all discs
+            max_track_number = max(track.number for track in tracks)
+            if max_track_number < 10:
+                padding = 1
+            elif max_track_number < 100:
+                padding = 2
+            elif max_track_number < 1000:
+                padding = 3
+            else:
+                padding = 4
+            disc_numbers = {
+                track.disc_number for track in tracks if track.disc_number is not None
+            }
+            return {disc: padding for disc in disc_numbers}
+
         else:
-            return 4  # "0001", "0002", etc.
+            # Per-disc padding: calculate padding separately for each disc
+            disc_tracks: Dict[Optional[int], List[TrackInfo]] = {}
+            for track in tracks:
+                disc_num = track.disc_number
+                if disc_num not in disc_tracks:
+                    disc_tracks[disc_num] = []
+                disc_tracks[disc_num].append(track)
+
+            padding_dict = {}
+            for disc_num, disc_track_list in disc_tracks.items():
+                max_track_in_disc = max(track.number for track in disc_track_list)
+                if max_track_in_disc < 10:
+                    padding_dict[disc_num] = 1
+                elif max_track_in_disc < 100:
+                    padding_dict[disc_num] = 2
+                elif max_track_in_disc < 1000:
+                    padding_dict[disc_num] = 3
+                else:
+                    padding_dict[disc_num] = 4
+
+            return padding_dict
 
     def _format_track_number(self, track_number: int, padding: int) -> str:
         """Format track number with proper padding."""
@@ -627,7 +682,7 @@ class KhinsiderDownloader:
         track: TrackInfo,
         album_dir: Path,
         album_url: str,
-        padding: int,
+        padding_dict: Dict[Optional[int], int],
     ) -> bool:
         """Download a single track."""
         async with self.semaphore:
@@ -638,11 +693,15 @@ class KhinsiderDownloader:
                 self._log_error("Could not find download URL", track_context)
                 return False
 
+            track_padding = padding_dict.get(
+                track.disc_number, 3
+            )  # Default to 3 if not found
+
             sanitized_name = self._sanitize_filename(
                 track.name,
                 track_number=track.number,
                 disc_number=track.disc_number,
-                padding=padding,
+                padding=track_padding,
             )
             file_path = album_dir / f"{sanitized_name}{track.file_extension}"
 
@@ -681,15 +740,15 @@ class KhinsiderDownloader:
                 self._log_error("No tracks found in album")
                 return False
 
-            padding = self._calculate_track_padding(len(tracks))
+            padding_dict = self._calculate_track_padding(tracks)
 
-            self._display_album_info(album_name, album_dir, len(tracks), padding)
+            self._display_album_info(album_name, album_dir, tracks, padding_dict)
             self._display_tracklist(tracks)
 
             download_tasks = []
             for track in tracks:
                 task = self._download_track(
-                    session, track, album_dir, album_url, padding
+                    session, track, album_dir, album_url, padding_dict
                 )
                 download_tasks.append(task)
 
@@ -708,9 +767,19 @@ class KhinsiderDownloader:
             return failed == 0
 
     def _display_album_info(
-        self, album_name: str, album_dir: Path, track_count: int, padding: int
+        self,
+        album_name: str,
+        album_dir: Path,
+        tracks: List[TrackInfo],
+        padding_dict: Dict[Optional[int], int],
     ) -> None:
         """Display album information and configuration."""
+        is_multi_disc = self._is_multi_disc(tracks)
+        disc_numbers = sorted(
+            {track.disc_number for track in tracks if track.disc_number is not None}
+        )
+        disc_count = len(disc_numbers) or 1
+
         base_delay_ms = (1.0 / self.config.rate_limit) * 1000
         max_delay_ms = base_delay_ms * (1 + self.config.jitter_percent / 100.0)
 
@@ -719,8 +788,31 @@ class KhinsiderDownloader:
         print(f"{Fore.GREEN}{'='*60}")
         print(f"{Fore.WHITE}Album: {Fore.CYAN}{album_name}")
         print(f"{Fore.WHITE}Output: {Fore.CYAN}{album_dir}")
-        print(f"{Fore.WHITE}Tracks: {Fore.CYAN}{track_count}")
-        print(f"{Fore.WHITE}Track Padding: {Fore.CYAN}{padding} digit(s)")
+        print(f"{Fore.WHITE}Tracks: {Fore.CYAN}{len(tracks)}")
+        print(
+            f"{Fore.WHITE}Discs: {Fore.CYAN}{disc_count} {'(Multi-Disc)' if is_multi_disc else '(Single Disc)'}"
+        )
+
+        if is_multi_disc:
+            if self.config.padding_mode == "total":
+                first_padding = next(iter(padding_dict.values()))
+                print(
+                    f"{Fore.WHITE}Track Padding: {Fore.CYAN}{first_padding} digit(s) (consistent across all discs)"
+                )
+            else:  # disc mode
+                padding_info = []
+                for disc_num in disc_numbers:
+                    padding = padding_dict.get(disc_num, 2)
+                    padding_info.append(f"Disc {disc_num}: {padding} digit(s)")
+                print(
+                    f"{Fore.WHITE}Track Padding: {Fore.CYAN}{', '.join(padding_info)}"
+                )
+        else:
+            # Single disc
+            padding = padding_dict.get(None, 2)
+            print(f"{Fore.WHITE}Track Padding: {Fore.CYAN}{padding} digit(s)")
+
+        print(f"{Fore.WHITE}Padding Mode: {Fore.CYAN}{self.config.padding_mode}")
         print(f"{Fore.GREEN}{'-'*60}")
         print(f"{Fore.CYAN}CONFIGURATION")
         print(f"{Fore.GREEN}{'-'*60}")
@@ -837,6 +929,15 @@ Examples:
     )
 
     parser.add_argument(
+        "-p",
+        "--padding-mode",
+        type=str,
+        choices=["disc", "total"],
+        default=Config.padding_mode,
+        help="Padding mode for multi-disc albums: 'disc' (per-disc padding) or 'total' (total track count padding) (default: disc)",
+    )
+
+    parser.add_argument(
         "-d", "--debug", action="store_true", help="Enable debug output"
     )
 
@@ -851,6 +952,7 @@ Examples:
         chunk_size=args.chunk_size if args.chunk_size != 0 else None,
         max_retries=args.max_retries,
         track_padding=args.track_padding,
+        padding_mode=args.padding_mode,
         debug=args.debug,
     )
 
