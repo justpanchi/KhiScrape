@@ -12,6 +12,7 @@ Fetches all tracks from given album URLs, selects the best available format, and
 - `-s, --chunk-size BYTES`: Chunk size, 0 for single write (default: 524288 / 512 KB)
 - `-m, --max-retries NUM`: Retry attempts (default: 3)
 - `-t, --track-padding {1,2,3,4}`: Track number padding (1=1,2,3; 2=01,02,03; 3=001,002,003; 4=0001,0002,0003). Default: auto-detect
+- `-p, --padding-mode {disc,total}`: Padding mode for multi-disc albums: 'disc' (per-disc padding) or 'total' (total track count padding) (default: disc)  
 - `-d, --debug`: Enable debug output (mess)
 
 ## Dependencies
