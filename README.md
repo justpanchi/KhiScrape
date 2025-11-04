@@ -73,19 +73,6 @@ python3 khiscrape.py \
   - `beautifulsoup4` - HTML parsing
   - `colorama` - Cross-platform colored terminal output
 
-## 📁 Output Structure
-KhiScrape/
-├── Album 1/
-│   ├── 01. Title.flac
-│   ├── 02. Title 2.flac
-│   └── ...
-├── Album 2/
-│   ├── 1-001. Title.flac
-│   ├── 1-002. Title 2.flac
-│   ├── 2-001. Title 3.flac
-│   └── ...
-└── ...
-
 ---
 
 ## License
