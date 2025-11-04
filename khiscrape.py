@@ -435,7 +435,7 @@ class KhinsiderDownloader:
     async def _get_download_info(
         self, session: aiohttp.ClientSession, track: TrackInfo, album_url: str
     ) -> bool:
-        """Get the best available download URL and file size for a track."""
+        """Get the best available download URL for a track."""
         track_context = self._get_track_context(track)
 
         response = await self._make_request(session, track.page_url, album_url)
@@ -465,23 +465,12 @@ class KhinsiderDownloader:
                         f"Trying format {fmt}: {download_url}", track_context
                     )
 
-                    # Get actual file size from the final download URL using HEAD request
-                    file_size = await self._get_remote_file_size(
-                        session, download_url, track.page_url
+                    track.download_url = download_url
+                    track.file_extension = f".{fmt}"
+                    self._log_debug(
+                        f"Found download URL: {download_url}", track_context
                     )
-                    if file_size is not None:
-                        track.download_url = download_url
-                        track.file_size = file_size
-                        track.file_extension = f".{fmt}"
-                        self._log_debug(
-                            f"Found download URL: {download_url} (size: {file_size} bytes)",
-                            track_context,
-                        )
-                        return True
-                    else:
-                        self._log_warning(
-                            f"Could not get file size for format {fmt}", track_context
-                        )
+                    return True
 
         self._log_warning(
             f"No preferred format found with accessible download", track_context
@@ -522,12 +511,39 @@ class KhinsiderDownloader:
         self, session: aiohttp.ClientSession, track: TrackInfo, file_path: Path
     ) -> bool:
         """Download a file with progress tracking and verification."""
-        if await self._should_skip_download(file_path, track.file_size):
-            self._log_info(f"File already exists with correct size: {file_path.name}")
-            return True
+        # Check if file exists and get local size for comparison
+        local_size = 0
+        file_exists = file_path.exists()
+        if file_exists:
+            local_size = file_path.stat().st_size
+            self._log_debug(f"Local file exists with size: {local_size} bytes")
 
-        file_size_mb = track.file_size / 1024 / 1024
-        self._log_info(f"Downloading: {file_path.name} ({file_size_mb:.1f} MB)")
+        # For existing files, we need to check remote size first using HEAD
+        if file_exists:
+            remote_size = await self._get_remote_file_size(
+                session, track.download_url, track.page_url
+            )
+            if remote_size is not None:
+                if local_size == remote_size:
+                    self._log_info(
+                        f"File already exists with correct size: {file_path.name}"
+                    )
+                    return True
+                else:
+                    self._log_warning(
+                        f"File exists but size mismatch: local {local_size} vs remote {remote_size}. Redownloading."
+                    )
+                    track.file_size = remote_size
+            else:
+                self._log_warning(
+                    "Could not get remote file size, proceeding with download"
+                )
+                # If we can't get remote size, proceed with download but don't set expected size
+
+        file_size_info = (
+            f" ({track.file_size / 1024 / 1024:.1f} MB)" if track.file_size > 0 else ""
+        )
+        self._log_info(f"Downloading: {file_path.name}{file_size_info}")
 
         temp_path = file_path.parent / f".{file_path.name}"
 
@@ -542,12 +558,21 @@ class KhinsiderDownloader:
                 ) as response:
                     response.raise_for_status()
 
+                    # Get content length from GET response
                     content_length = int(response.headers.get("Content-Length", 0))
 
-                    if content_length > 0 and content_length != track.file_size:
-                        self._log_warning(
-                            f"Content-Length mismatch: expected {track.file_size}, got {content_length}"
+                    # For new files, set the file size from the GET response
+                    if not file_exists and content_length > 0:
+                        track.file_size = content_length
+                        self._log_debug(
+                            f"Set file size from GET response: {content_length} bytes"
                         )
+
+                    if file_exists and track.file_size > 0 and content_length > 0:
+                        if content_length != track.file_size:
+                            self._log_warning(
+                                f"Content-Length mismatch: HEAD {track.file_size} vs GET {content_length}"
+                            )
 
                     async with aiofiles.open(temp_path, "wb") as f:
                         if self.config.chunk_size is None:
@@ -570,10 +595,15 @@ class KhinsiderDownloader:
                         )
 
                     temp_path.rename(file_path)
-                    self._log_info(f"Successfully downloaded: {file_path.name}")
+
+                    if file_exists:
+                        self._log_info(f"Successfully re-downloaded: {file_path.name}")
+                    else:
+                        self._log_info(f"Successfully downloaded: {file_path.name}")
                     return True
 
             except Exception as e:
+                # Clean up temp file on error
                 if temp_path.exists():
                     temp_path.unlink()
 
