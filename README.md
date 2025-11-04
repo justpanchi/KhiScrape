@@ -1,25 +1,112 @@
-# KhiScrape (Khinsider Music Downloader)
-Asynchronous Python script to download game soundtracks from [Khinsider](https://downloads.khinsider.com/).
-Fetches all tracks from given album URLs, selects the best available format, and downloads them concurrently with rate limiting, retry handling, and automatic disc/track number extraction (with optional zero-padding, enabled by default).
+# KhiScrape - Khinsider Music Downloader
 
-## Configuration Options
-- `urls`: Album URLs to download (required)
-- `-o, --output PATH`: Output directory (default: KhiScrape)
-- `-c, --concurrency NUM`: Concurrent downloads (default: 4)
-- `-r, --rate-limit RPS`: Requests per second (default: 2.0)
-- `-j, --jitter JITTER`: Jitter as percentage of base delay (default: 70%)
-- `-f, --formats LIST`: Preferred formats (default: flac,wav,m4a,opus,ogg,aac,mp3)
-- `-s, --chunk-size BYTES`: Chunk size, 0 for single write (default: 524288 / 512 KB)
-- `-m, --max-retries NUM`: Retry attempts (default: 3)
-- `-t, --track-padding {1,2,3,4}`: Track number padding (1=1,2,3; 2=01,02,03; 3=001,002,003; 4=0001,0002,0003). Default: auto-detect
-- `-p, --padding-mode {disc,total}`: Padding mode for multi-disc albums: 'disc' (per-disc padding) or 'total' (total track count padding) (default: disc)  
-- `-d, --debug`: Enable debug output (mess)
+Asynchronous Python script to download complete game soundtracks from [Khinsider](https://downloads.khinsider.com/). Fetches all tracks from given album URLs, selects the best available format from your preferred list, and downloads them concurrently with retry handling, rate limiting, and automatic disc/track number extraction (zero-padding enabled by default).
 
-## Dependencies
-- Python >=3.7
-- Third-party: `pip install aiohttp aiofiles beautifulsoup4 colorama`
+## ✨ Features
 
-## Example Usage
+### 🎯 Core Functionality
+- **Complete Album Downloads** - Fetch all tracks from provided album URLs
+- **User Format Selection** - Automatically chooses best available audio format from your preferred list
+- **Multi-Disc Support** - Automatic disc detection
+- **Track Padding** - Automatic track number extraction with configurable padding
+
+### ⚡ Performance & Reliability
+- **Asynchronous Downloads** - Concurrent downloads with configurable limits
+- **Rate Limiting** - Adjustable rate limit in requests per second and jitter
+- **Retry Mechanism** - Automatic retries with exponential backoff for failed downloads
+- **Atomic & Safe Downloads** - Downloads are written to a temporary file and only moved upon successful completion
+- **File Verification** - Size validation to ensure complete downloads
+- **Filesystem Safety** - Automatic filename sanitization for cross-platform compatibility
+
+### 🎛️ Configuration
+- **Format Preferences** - Customize preferred audio formats (FLAC, MP3, etc.)
+- **Track Number Padding** - Auto-detection or manual control over track numbering
+- **Multi-Disc Padding Modes** - Padding per-disc or total track count
+- **Chunked Downloads** - Configurable chunk sizes for large files
+
+## 🚀 Quick Start
+
+### Installation
+```sh
+pip install aiohttp aiofiles beautifulsoup4 colorama
+```
+
+### Basic Usage
 ```sh
 python3 khiscrape.py https://downloads.khinsider.com/game-soundtracks/album/mario-kart-8-full-gamerip
 ```
+
+### Advanced Usage
+```sh
+python3 khiscrape.py \
+  --output "$HOME/Music/Soundtracks" \
+  --concurrency 3 \
+  --rate-limit 3 \
+  --formats flac,mp3 \
+  --track-padding 2 \
+  https://downloads.khinsider.com/game-soundtracks/album/pokemon-black-and-white-super-music-collection
+  ```
+
+## ⚙️ Configuration Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `urls` | Album URLs to download (required) | - |
+| `-o, --output PATH` | Output directory | `KhiScrape` |
+| `-c, --concurrency NUM` | Concurrent downloads | `4` |
+| `-r, --rate-limit RPS` | Requests per second | `2.0` |
+| `-j, --jitter JITTER` | Jitter as percentage of base delay | `70%` |
+| `-f, --formats LIST` | Preferred formats in order | `flac,wav,m4a,opus,ogg,aac,mp3` |
+| `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `524288` (512KB) |
+| `-m, --max-retries NUM` | Retry attempts | `3` |
+| `-t, --track-padding` | Track number padding (1-4 digits) | Auto-detect |
+| `-p, --padding-mode` | Multi-disc padding: `disc` or `total` | `disc` |
+| `-d, --debug` | Enable debug output | `False` |
+
+## 🛠️ Technical Details
+
+### Requirements
+- **Python**: >= 3.7
+- **Dependencies**:
+  - `aiohttp` - Asynchronous HTTP client
+  - `aiofiles` - Async file operations
+  - `beautifulsoup4` - HTML parsing
+  - `colorama` - Cross-platform colored terminal output
+
+## 📁 Output Structure
+KhiScrape/
+├── Album 1/
+│   ├── 01. Title.flac
+│   ├── 02. Title 2.flac
+│   └── ...
+├── Album 2/
+│   ├── 1-001. Title.flac
+│   ├── 1-002. Title 2.flac
+│   ├── 2-001. Title 3.flac
+│   └── ...
+└── ...
+
+---
+
+## License
+MIT License
+
+Copyright (c) 2025 PanChi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
