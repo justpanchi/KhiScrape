@@ -59,8 +59,8 @@ python3 khiscrape.py \
 | `-f, --formats LIST` | Preferred formats in order | `flac,wav,m4a,opus,ogg,aac,mp3` |
 | `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `524288` (512KB) |
 | `-m, --max-retries NUM` | Retry attempts | `3` |
-| `-t, --track-padding` | Track number padding (1-4 digits) | Auto-detect |
-| `-p, --padding-mode` | Multi-disc padding: `disc` or `total` | `disc` |
+| `-t, --track-padding NUM` | Track number padding (1-4 digits) | Auto-detect |
+| `-p, --padding-mode MODE` | Multi-disc padding: `disc` or `total` | `disc` |
 | `-d, --debug` | Enable debug output | `False` |
 
 ## 🛠️ Technical Details
