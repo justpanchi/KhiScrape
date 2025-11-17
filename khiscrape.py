@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import logging
 import random
 import re
 import sys
@@ -71,6 +72,79 @@ class TrackInfo:
     file_extension: str = ""
 
 
+class ColorFormatter(logging.Formatter):
+    """Custom formatter for colored logging output."""
+
+    COLORS = {
+        "INFO": Fore.CYAN,
+        "WARNING": Fore.YELLOW,
+        "ERROR": Fore.RED,
+        "DEBUG": Fore.YELLOW,
+        "TRACKLIST": Fore.MAGENTA,
+        "SEPARATOR": Fore.GREEN,
+        "HEADER": Fore.CYAN,
+        "KEY_VALUE": Fore.WHITE,
+        "VALUE": Fore.CYAN,
+    }
+
+    PREFIXES = {
+        "INFO": "[INFO]",
+        "WARNING": "[WARN]",
+        "ERROR": "[ERROR]",
+        "DEBUG": "[DEBUG]",
+        "TRACKLIST": "[TRACKLIST]",
+    }
+
+    def format(self, record):
+        if hasattr(record, "separator"):
+            color = self.COLORS["SEPARATOR"]
+            return f"{color}{record.getMessage()}{Style.RESET_ALL}"
+
+        if hasattr(record, "header"):
+            color = self.COLORS["HEADER"]
+            return f"{color}{record.getMessage()}{Style.RESET_ALL}"
+
+        if hasattr(record, "key_value"):
+            key = getattr(record, "key", "")
+            value = getattr(record, "value", "")
+            key_color = self.COLORS["KEY_VALUE"]
+            value_color = self.COLORS["VALUE"]
+            return f"{key_color}{key}: {value_color}{value}{Style.RESET_ALL}"
+
+        if hasattr(record, "tracklist_content"):
+            return record.getMessage()
+
+        if hasattr(record, "tracklist"):
+            color = self.COLORS["TRACKLIST"]
+            prefix = self.PREFIXES["TRACKLIST"]
+        else:
+            color = self.COLORS.get(record.levelname, "")
+            prefix = self.PREFIXES.get(record.levelname, f"[{record.levelname}]")
+
+        message = super().format(record)
+        return f"{color}{prefix}{Style.RESET_ALL} {message}"
+
+
+def setup_logging(
+    debug: bool = False, logger: Optional[logging.Logger] = None
+) -> logging.Logger:
+    """Set up logging for the application."""
+    if logger is None:
+        logger = logging.getLogger("khinsider_downloader")
+
+    # Only add handlers if none exist (to avoid duplicates in module usage)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+        console_handler.setFormatter(ColorFormatter())
+
+        logger.addHandler(console_handler)
+
+    return logger
+
+
 class RateLimiter:
     """Global rate limiter for all HTTP requests with jitter support."""
 
@@ -101,8 +175,10 @@ class RateLimiter:
 class KhinsiderDownloader:
     """Main downloader class for Khinsider albums."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, logger: Optional[logging.Logger] = None) -> None:
+        """Initialize the downloader."""
         self.config = config
+        self.logger = logger or logging.getLogger("khinsider_downloader")
         self.rate_limiter = RateLimiter(config.rate_limit, config.jitter_percent)
         self.semaphore = asyncio.Semaphore(config.max_concurrency)
 
@@ -156,12 +232,12 @@ class KhinsiderDownloader:
             except Exception as e:
                 if attempt < self.config.max_retries:
                     wait_time = 2**attempt
-                    self._log_warning(
+                    self.logger.warning(
                         f"Request failed (attempt {attempt + 1}/{self.config.max_retries + 1}): {e}. Retrying in {wait_time}s..."
                     )
                     await asyncio.sleep(wait_time)
                 else:
-                    self._log_error(
+                    self.logger.error(
                         f"Request failed after {self.config.max_retries} retries: {e}"
                     )
                     return None
@@ -279,28 +355,6 @@ class KhinsiderDownloader:
 
         return prefix + sanitized
 
-    def _log_info(self, message: str) -> None:
-        """Log informational message."""
-        print(f"{Fore.CYAN}[INFO]{Style.RESET_ALL} {message}")
-
-    def _log_warning(self, message: str) -> None:
-        """Log warning message."""
-        print(f"{Fore.YELLOW}[WARN]{Style.RESET_ALL} {message}")
-
-    def _log_error(self, message: str) -> None:
-        """Log error message."""
-        print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} {message}")
-
-    def _log_debug(self, message: str, track_context: Optional[str] = None) -> None:
-        """Log debug message if enabled."""
-        if self.config.debug:
-            context = f"[{track_context}] " if track_context else ""
-            print(f"{Fore.YELLOW}[DEBUG]{Style.RESET_ALL} {context}{message}")
-
-    def _log_tracklist(self, message: str) -> None:
-        """Log tracklist message."""
-        print(f"{Fore.MAGENTA}[TRACKLIST]{Style.RESET_ALL} {message}")
-
     def _get_track_context(self, track: TrackInfo) -> str:
         """Get formatted track context for logging."""
         if track.disc_number is not None:
@@ -333,14 +387,14 @@ class KhinsiderDownloader:
                     clean_text = re.sub(r"MP3 - Download.*", "", clean_text)
                     clean_text = clean_text.strip()
                     if clean_text:
-                        self._log_debug(
+                        self.logger.debug(
                             f"Extracted album name via {strategy.__name__}: {clean_text}"
                         )
                         return self._sanitize_filename(clean_text)
 
         # Fallback: use URL path
         fallback = urlparse(album_url).path.split("/")[-1] or "unknown_album"
-        self._log_warning(f"Using URL fallback for album name: {fallback}")
+        self.logger.warning(f"Using URL fallback for album name: {fallback}")
         return self._sanitize_filename(fallback)
 
     async def _get_track_list(
@@ -351,7 +405,7 @@ class KhinsiderDownloader:
         tracklist_table = soup.find("table", id="songlist")
 
         if not tracklist_table:
-            self._log_error("Could not find tracklist table")
+            self.logger.error("Could not find tracklist table")
             return tracks
 
         # Get all rows, skip header and footer
@@ -361,11 +415,11 @@ class KhinsiderDownloader:
         ]  # Skip footer
 
         if not rows:
-            self._log_error("No track rows found")
+            self.logger.error("No track rows found")
             return tracks
 
         first_row_cells = rows[0].find_all("td")
-        self._log_debug(f"First row has {len(first_row_cells)} cells")
+        self.logger.debug(f"First row has {len(first_row_cells)} cells")
 
         has_disc_numbers = False
         has_track_numbers = False
@@ -381,18 +435,20 @@ class KhinsiderDownloader:
                     ) or "MB" in cell_text
                     if not is_duration:
                         track_name_index = i
-                        self._log_debug(f"Track name found at index {i}: '{cell_text}'")
+                        self.logger.debug(
+                            f"Track name found at index {i}: '{cell_text}'"
+                        )
                         break
 
         if track_name_index is None:
-            self._log_error("Could not find track name column")
+            self.logger.error("Could not find track name column")
             return tracks
 
         if track_name_index >= 3:
             # Structure: [play, disc, track_num, name, ...]
             has_disc_numbers = True
             has_track_numbers = True
-            self._log_debug("Detected structure: with disc numbers and track numbers")
+            self.logger.debug("Detected structure: with disc numbers and track numbers")
         elif track_name_index == 2:
             prev_cell = first_row_cells[1]
             prev_text = prev_cell.get_text().strip().rstrip(".")
@@ -401,13 +457,13 @@ class KhinsiderDownloader:
                 or (prev_text[:-1].isdigit() and prev_text.endswith("."))
             ):
                 has_track_numbers = True
-                self._log_debug(
+                self.logger.debug(
                     "Detected structure: with track numbers, no disc numbers"
                 )
             else:
-                self._log_debug("Detected structure: no disc or track numbers")
+                self.logger.debug("Detected structure: no disc or track numbers")
         elif track_name_index == 1:
-            self._log_debug(
+            self.logger.debug(
                 "Detected structure: no disc or track numbers (minimal columns)"
             )
 
@@ -478,11 +534,11 @@ class KhinsiderDownloader:
                         disc_number=disc_number,
                     )
                     tracks.append(track)
-                    self._log_debug(f"Found track: {track_name} -> {track_url}")
+                    self.logger.debug(f"Found track: {track_name} -> {track_url}")
                     current_track_number += 1
 
             except Exception as e:
-                self._log_error(f"Error parsing track row: {e}")
+                self.logger.error(f"Error parsing track row: {e}")
                 continue
 
         return tracks
@@ -510,24 +566,24 @@ class KhinsiderDownloader:
             ):
                 download_links.append((href, text))
 
-        self._log_debug(f"Found {len(download_links)} download links", track_context)
+        self.logger.debug(f"Found {len(download_links)} download links", track_context)
 
         for fmt in self.config.preferred_formats:
             for href, text in download_links:
                 if f"download as {fmt}" in text:
                     download_url = urljoin(track.page_url, href)
-                    self._log_debug(
+                    self.logger.debug(
                         f"Trying format {fmt}: {download_url}", track_context
                     )
 
                     track.download_url = download_url
                     track.file_extension = f".{fmt}"
-                    self._log_debug(
+                    self.logger.debug(
                         f"Found download URL: {download_url}", track_context
                     )
                     return True
 
-        self._log_warning(
+        self.logger.warning(
             f"No preferred format found with accessible download", track_context
         )
         return False
@@ -545,7 +601,7 @@ class KhinsiderDownloader:
                 try:
                     return int(content_length)
                 except ValueError:
-                    self._log_debug(f"Invalid Content-Length: {content_length}")
+                    self.logger.debug(f"Invalid Content-Length: {content_length}")
         return None
 
     async def _should_skip_download(self, file_path: Path, expected_size: int) -> bool:
@@ -557,7 +613,7 @@ class KhinsiderDownloader:
         if actual_size == expected_size:
             return True
 
-        self._log_debug(
+        self.logger.debug(
             f"File size mismatch: local {actual_size} vs remote {expected_size}"
         )
         return False
@@ -571,7 +627,7 @@ class KhinsiderDownloader:
         file_exists = file_path.exists()
         if file_exists:
             local_size = file_path.stat().st_size
-            self._log_debug(f"Local file exists with size: {local_size} bytes")
+            self.logger.debug(f"Local file exists with size: {local_size} bytes")
 
         # For existing files, we need to check remote size first using HEAD
         if file_exists:
@@ -580,17 +636,17 @@ class KhinsiderDownloader:
             )
             if remote_size is not None:
                 if local_size == remote_size:
-                    self._log_info(
+                    self.logger.info(
                         f"File already exists with correct size: {file_path.name}"
                     )
                     return True
                 else:
-                    self._log_warning(
+                    self.logger.warning(
                         f"File exists but size mismatch: local {local_size} vs remote {remote_size}. Redownloading."
                     )
                     track.file_size = remote_size
             else:
-                self._log_warning(
+                self.logger.warning(
                     "Could not get remote file size, proceeding with download"
                 )
                 # If we can't get remote size, proceed with download but don't set expected size
@@ -598,7 +654,7 @@ class KhinsiderDownloader:
         file_size_info = (
             f" ({track.file_size / 1024 / 1024:.1f} MB)" if track.file_size > 0 else ""
         )
-        self._log_info(f"Downloading: {file_path.name}{file_size_info}")
+        self.logger.info(f"Downloading: {file_path.name}{file_size_info}")
 
         temp_path = file_path.parent / f".{file_path.name}"
 
@@ -619,13 +675,13 @@ class KhinsiderDownloader:
                     # For new files, set the file size from the GET response
                     if not file_exists and content_length > 0:
                         track.file_size = content_length
-                        self._log_debug(
+                        self.logger.debug(
                             f"Set file size from GET response: {content_length} bytes"
                         )
 
                     if file_exists and track.file_size > 0 and content_length > 0:
                         if content_length != track.file_size:
-                            self._log_warning(
+                            self.logger.warning(
                                 f"Content-Length mismatch: HEAD {track.file_size} vs GET {content_length}"
                             )
 
@@ -652,9 +708,11 @@ class KhinsiderDownloader:
                     temp_path.rename(file_path)
 
                     if file_exists:
-                        self._log_info(f"Successfully re-downloaded: {file_path.name}")
+                        self.logger.info(
+                            f"Successfully re-downloaded: {file_path.name}"
+                        )
                     else:
-                        self._log_info(f"Successfully downloaded: {file_path.name}")
+                        self.logger.info(f"Successfully downloaded: {file_path.name}")
                     return True
 
             except Exception as e:
@@ -664,12 +722,12 @@ class KhinsiderDownloader:
 
                 if attempt < self.config.max_retries:
                     wait_time = 2**attempt
-                    self._log_warning(
+                    self.logger.warning(
                         f"Download failed (attempt {attempt + 1}/{self.config.max_retries + 1}): {e}. Retrying in {wait_time}s..."
                     )
                     await asyncio.sleep(wait_time)
                 else:
-                    self._log_error(
+                    self.logger.error(
                         f"Download failed after {self.config.max_retries} retries: {e}"
                     )
                     return False
@@ -687,10 +745,10 @@ class KhinsiderDownloader:
         """Download a single track."""
         async with self.semaphore:
             track_context = self._get_track_context(track)
-            self._log_debug("Processing track", track_context)
+            self.logger.debug("Processing track", track_context)
 
             if not await self._get_download_info(session, track, album_url):
-                self._log_error("Could not find download URL", track_context)
+                self.logger.error("Could not find download URL", track_context)
                 return False
 
             track_padding = padding_dict.get(
@@ -708,15 +766,15 @@ class KhinsiderDownloader:
             success = await self._download_file(session, track, file_path)
 
             if success:
-                self._log_debug("Completed", track_context)
+                self.logger.debug("Completed", track_context)
             else:
-                self._log_error("Failed", track_context)
+                self.logger.error("Failed", track_context)
 
             return success
 
     async def download_album(self, album_url: str) -> bool:
         """Download all tracks from an album."""
-        self._log_info(f"Processing album: {album_url}")
+        self.logger.info(f"Processing album: {album_url}")
 
         connector = TCPConnector(limit=self.config.max_concurrency * 2)
         async with aiohttp.ClientSession(
@@ -737,7 +795,7 @@ class KhinsiderDownloader:
 
             tracks = await self._get_track_list(soup, album_url)
             if not tracks:
-                self._log_error("No tracks found in album")
+                self.logger.error("No tracks found in album")
                 return False
 
             padding_dict = self._calculate_track_padding(tracks)
@@ -758,11 +816,11 @@ class KhinsiderDownloader:
             successful = sum(1 for r in results if r is True)
             failed = len(tracks) - successful
 
-            self._log_info(
+            self.logger.info(
                 f"Album completed: {successful}/{len(tracks)} tracks downloaded successfully"
             )
             if failed > 0:
-                self._log_warning(f"{failed} tracks failed to download")
+                self.logger.warning(f"{failed} tracks failed to download")
 
             return failed == 0
 
@@ -783,55 +841,77 @@ class KhinsiderDownloader:
         base_delay_ms = (1.0 / self.config.rate_limit) * 1000
         max_delay_ms = base_delay_ms * (1 + self.config.jitter_percent / 100.0)
 
-        print(f"\n{Fore.GREEN}{'='*60}")
-        print(f"{Fore.CYAN}ALBUM INFORMATION")
-        print(f"{Fore.GREEN}{'='*60}")
-        print(f"{Fore.WHITE}Album: {Fore.CYAN}{album_name}")
-        print(f"{Fore.WHITE}Output: {Fore.CYAN}{album_dir}")
-        print(f"{Fore.WHITE}Tracks: {Fore.CYAN}{len(tracks)}")
-        print(
-            f"{Fore.WHITE}Discs: {Fore.CYAN}{disc_count} {'(Multi-Disc)' if is_multi_disc else '(Single Disc)'}"
+        lines = []
+        lines.append(("=" * 60, "separator"))
+        lines.append(("ALBUM INFORMATION", "header"))
+        lines.append(("=" * 60, "separator"))
+        lines.append(("Album", album_name, "key_value"))
+        lines.append(("Output", str(album_dir), "key_value"))
+        lines.append(("Tracks", str(len(tracks)), "key_value"))
+        lines.append(
+            (
+                "Discs",
+                f"{disc_count} {'(Multi-Disc)' if is_multi_disc else '(Single Disc)'}",
+                "key_value",
+            )
         )
 
         if is_multi_disc:
             if self.config.padding_mode == "total":
                 first_padding = next(iter(padding_dict.values()))
-                print(
-                    f"{Fore.WHITE}Track Padding: {Fore.CYAN}{first_padding} digit(s) (consistent across all discs)"
+                lines.append(
+                    (
+                        "Track Padding",
+                        f"{first_padding} digit(s) (consistent across all discs)",
+                        "key_value",
+                    )
                 )
             else:  # disc mode
                 padding_info = []
                 for disc_num in disc_numbers:
                     padding = padding_dict.get(disc_num, 2)
                     padding_info.append(f"Disc {disc_num}: {padding} digit(s)")
-                print(
-                    f"{Fore.WHITE}Track Padding: {Fore.CYAN}{', '.join(padding_info)}"
-                )
+                lines.append(("Track Padding", ", ".join(padding_info), "key_value"))
         else:
             # Single disc
             padding = padding_dict.get(None, 2)
-            print(f"{Fore.WHITE}Track Padding: {Fore.CYAN}{padding} digit(s)")
+            lines.append(("Track Padding", f"{padding} digit(s)", "key_value"))
 
-        print(f"{Fore.WHITE}Padding Mode: {Fore.CYAN}{self.config.padding_mode}")
-        print(f"{Fore.GREEN}{'-'*60}")
-        print(f"{Fore.CYAN}CONFIGURATION")
-        print(f"{Fore.GREEN}{'-'*60}")
-        print(
-            f"{Fore.WHITE}Concurrent Downloads: {Fore.CYAN}{self.config.max_concurrency}"
+        lines.append(("Padding Mode", self.config.padding_mode, "key_value"))
+        lines.append(("-" * 60, "separator"))
+        lines.append(("CONFIGURATION", "header"))
+        lines.append(("-" * 60, "separator"))
+        lines.append(
+            ("Concurrent Downloads", str(self.config.max_concurrency), "key_value")
         )
-        print(f"{Fore.WHITE}Rate Limit: {Fore.CYAN}{self.config.rate_limit} RPS")
-        print(f"{Fore.WHITE}Jitter: {Fore.CYAN}{self.config.jitter_percent}%")
-        print(
-            f"{Fore.WHITE}Request Delay: {Fore.CYAN}{base_delay_ms:.0f}-{max_delay_ms:.0f} ms"
+        lines.append(("Rate Limit", f"{self.config.rate_limit} RPS", "key_value"))
+        lines.append(("Jitter", f"{self.config.jitter_percent}%", "key_value"))
+        lines.append(
+            ("Request Delay", f"{base_delay_ms:.0f}-{max_delay_ms:.0f} ms", "key_value")
         )
-        print(
-            f"{Fore.WHITE}Preferred Formats: {Fore.CYAN}{', '.join(self.config.preferred_formats)}"
+        lines.append(
+            ("Preferred Formats", ", ".join(self.config.preferred_formats), "key_value")
         )
-        print(f"{Fore.WHITE}Max Retries: {Fore.CYAN}{self.config.max_retries}")
-        print(
-            f"{Fore.WHITE}Chunk Size: {Fore.CYAN}{self.config.chunk_size or 'Single write'}"
+        lines.append(("Max Retries", str(self.config.max_retries), "key_value"))
+        lines.append(
+            ("Chunk Size", str(self.config.chunk_size or "Single write"), "key_value")
         )
-        print(f"{Fore.GREEN}{'='*60}\n")
+        lines.append(("=" * 60, "separator"))
+
+        for line in lines:
+            if len(line) == 2:
+                text, line_type = line
+                if line_type == "separator":
+                    self.logger.info(text, extra={"separator": True})
+                elif line_type == "header":
+                    self.logger.info(text, extra={"header": True})
+                else:
+                    self.logger.info(text)
+            else:  # key_value
+                key, value, line_type = line
+                self.logger.info(
+                    "", extra={"key_value": True, "key": key, "value": value}
+                )
 
     def _display_tracklist(self, tracks: List[TrackInfo]) -> None:
         """Display the tracklist efficiently in a single call."""
@@ -845,7 +925,10 @@ class KhinsiderDownloader:
                 track_entries.append(f"{track.number:03d}. {track.name}")
 
         tracklist_text = "\n".join(track_entries)
-        self._log_tracklist(f"Tracklist ({len(tracks)} tracks):\n{tracklist_text}")
+        self.logger.info(
+            f"Tracklist ({len(tracks)} tracks):", extra={"tracklist": True}
+        )
+        self.logger.info(tracklist_text, extra={"tracklist_content": True})
 
 
 async def main() -> None:
@@ -943,6 +1026,9 @@ Examples:
 
     args = parser.parse_args()
 
+    # Set up logging for CLI usage
+    logger = setup_logging(args.debug)
+
     config = Config(
         output_path=args.output,
         max_concurrency=args.concurrency,
@@ -957,18 +1043,19 @@ Examples:
     )
 
     if config.max_concurrency < 1:
-        print(f"{Fore.RED}Error: Concurrency must be at least 1")
+        print(f"{Fore.RED}Error: Concurrency must be at least 1", file=sys.stderr)
         sys.exit(1)
 
     if config.rate_limit <= 0:
-        print(f"{Fore.RED}Error: Rate limit must be positive")
+        print(f"{Fore.RED}Error: Rate limit must be positive", file=sys.stderr)
         sys.exit(1)
 
     if config.jitter_percent < 0 or config.jitter_percent > 100:
-        print(f"{Fore.RED}Error: Jitter must be between 0 and 100")
+        print(f"{Fore.RED}Error: Jitter must be between 0 and 100", file=sys.stderr)
         sys.exit(1)
 
-    downloader = KhinsiderDownloader(config)
+    # Pass the configured logger to the downloader
+    downloader = KhinsiderDownloader(config, logger)
 
     successful_albums = 0
     for url in args.urls:
@@ -977,15 +1064,29 @@ Examples:
             if success:
                 successful_albums += 1
         except Exception as e:
-            downloader._log_error(f"Failed to process album {url}: {e}")
+            downloader.logger.error(f"Failed to process album {url}: {e}")
 
-    print(f"\n{Fore.GREEN}{'='*60}")
-    print(f"{Fore.CYAN}SUMMARY")
-    print(f"{Fore.GREEN}{'='*60}")
-    print(
-        f"{Fore.WHITE}Albums processed: {Fore.CYAN}{successful_albums}/{len(args.urls)}"
+    summary_lines = []
+    summary_lines.append(("=" * 60, "separator"))
+    summary_lines.append(("SUMMARY", "header"))
+    summary_lines.append(("=" * 60, "separator"))
+    summary_lines.append(
+        ("Albums processed", f"{successful_albums}/{len(args.urls)}", "key_value")
     )
-    print(f"{Fore.GREEN}{'='*60}")
+    summary_lines.append(("=" * 60, "separator"))
+
+    for line in summary_lines:
+        if len(line) == 2:
+            text, line_type = line
+            if line_type == "separator":
+                logger.info(text, extra={"separator": True})
+            elif line_type == "header":
+                logger.info(text, extra={"header": True})
+            else:
+                logger.info(text)
+        else:  # key_value
+            key, value, line_type = line
+            logger.info("", extra={"key_value": True, "key": key, "value": value})
 
 
 if __name__ == "__main__":
