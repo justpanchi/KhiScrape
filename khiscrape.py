@@ -132,7 +132,7 @@ def setup_logging(
     if logger is None:
         logger = logging.getLogger("khinsider_downloader")
 
-    # Only add handlers if none exist (to avoid duplicates in module usage)
+    # Only add handlers if none exist to avoid duplicates
     if not logger.handlers:
         logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
