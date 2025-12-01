@@ -5,7 +5,7 @@ Asynchronous Python script to download complete game soundtracks from [Khinsider
 ## ✨ Features
 
 ### 🎯 Core Functionality
-- **Complete Album Downloads** - Fetch all tracks from provided album URLs
+- **Complete Album Downloads** - Fetch all artworks and tracks from provided album URLs
 - **User Format Selection** - Automatically chooses best available audio format from your preferred list
 - **Multi-Disc Support** - Automatic disc detection
 - **Track Padding** - Automatic track number extraction with configurable padding
