@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
 
 import aiofiles
 import aiohttp
@@ -70,6 +70,15 @@ class TrackInfo:
     download_url: Optional[str] = None
     file_size: int = 0
     file_extension: str = ""
+
+
+@dataclass
+class ArtworkInfo:
+    """Information about an artwork."""
+
+    url: str
+    filename: str
+    file_size: int = 0
 
 
 class ColorFormatter(logging.Formatter):
@@ -172,14 +181,33 @@ class RateLimiter:
             self.last_request_time = time.monotonic()
 
 
-class KhinsiderDownloader:
-    """Main downloader class for Khinsider albums."""
+class DownloadContext:
+    """Context handling for tracks and artworks."""
 
-    def __init__(self, config: Config, logger: Optional[logging.Logger] = None) -> None:
+    @staticmethod
+    def get_track_context(track: TrackInfo) -> str:
+        """Get simple track context for logging."""
+        if track.disc_number is not None:
+            return f"Track {track.disc_number}-{track.number:03d}"
+        else:
+            return f"Track {track.number:03d}"
+
+    @staticmethod
+    def get_artwork_context(artwork: ArtworkInfo) -> str:
+        """Get artwork context for logging."""
+        return f"Artwork {artwork.filename}"
+
+
+class BaseDownloader:
+    """Base downloader class with common download functionality."""
+
+    def __init__(
+        self, config: Config, logger: logging.Logger, rate_limiter: RateLimiter
+    ) -> None:
         """Initialize the downloader."""
         self.config = config
-        self.logger = logger or logging.getLogger("khinsider_downloader")
-        self.rate_limiter = RateLimiter(config.rate_limit, config.jitter_percent)
+        self.logger = logger
+        self.rate_limiter = rate_limiter
         self.semaphore = asyncio.Semaphore(config.max_concurrency)
 
         self.timeout = ClientTimeout(
@@ -241,6 +269,281 @@ class KhinsiderDownloader:
                         f"Request failed after {self.config.max_retries} retries: {e}"
                     )
                     return None
+
+    async def _get_remote_file_size(
+        self, session: aiohttp.ClientSession, download_url: str, referer: str
+    ) -> Optional[int]:
+        """Get file size from remote server using HEAD request."""
+        response = await self._make_request(
+            session, download_url, referer, method="HEAD"
+        )
+        if response:
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    return int(content_length)
+                except ValueError:
+                    self.logger.debug(f"Invalid Content-Length: {content_length}")
+        return None
+
+    async def _should_skip_download(self, file_path: Path, expected_size: int) -> bool:
+        """Check if file already exists with correct size."""
+        if not file_path.exists():
+            return False
+
+        actual_size = file_path.stat().st_size
+        if actual_size == expected_size:
+            return True
+
+        self.logger.debug(
+            f"File size mismatch: local {actual_size} vs remote {expected_size}"
+        )
+        return False
+
+    def _sanitize_filename(
+        self,
+        name: str,
+        is_temp: bool = False,
+    ) -> str:
+        """Sanitize filename to be filesystem-safe."""
+        # URL decode the filename first
+        decoded_name = unquote(name)
+
+        sanitized = re.sub(
+            self.config.invalid_chars_pattern,
+            self.config.invalid_chars_replacement,
+            decoded_name,
+        )
+
+        max_bytes = self.config.max_filename_bytes
+        if is_temp:
+            max_bytes -= 1  # Reserve one byte for the dot prefix
+
+        encoded_sanitized = sanitized.encode("utf-8")
+        if len(encoded_sanitized) > max_bytes:
+            truncated = encoded_sanitized[:max_bytes]
+            # Avoid breaking UTF-8 sequences
+            while truncated and truncated[-1] & 0x80 and not (truncated[-1] & 0x40):
+                truncated = truncated[:-1]
+            sanitized = truncated.decode("utf-8", errors="ignore")
+
+        return sanitized
+
+    async def _download_file(
+        self,
+        session: aiohttp.ClientSession,
+        download_url: str,
+        file_path: Path,
+        referer: str,
+        context: str = "File",
+    ) -> bool:
+        """Download a file with progress tracking and verification."""
+        local_size = 0
+        file_exists = file_path.exists()
+        if file_exists:
+            local_size = file_path.stat().st_size
+            self.logger.debug(
+                f"Local file exists with size: {local_size} bytes"
+            )  # no context
+
+        # For existing files, we need to check remote size first using HEAD
+        remote_size = None
+        if file_exists:
+            remote_size = await self._get_remote_file_size(
+                session, download_url, referer
+            )
+            if remote_size is not None:
+                if local_size == remote_size:
+                    self.logger.info(
+                        f"{context} already exists with correct size: {file_path.name}"
+                    )
+                    return True
+                else:
+                    self.logger.warning(
+                        f"{context} exists but size mismatch: local {local_size} vs remote {remote_size}. Redownloading."
+                    )
+            else:
+                self.logger.warning(
+                    f"Could not get remote {context.lower()} size, proceeding with download"
+                )
+
+        file_size_info = (
+            f" ({remote_size / 1024 / 1024:.1f} MB)"
+            if remote_size and remote_size > 0
+            else ""
+        )
+        self.logger.info(
+            f"Downloading {context.lower()}: {file_path.name}{file_size_info}"
+        )
+
+        temp_path = file_path.parent / f".{file_path.name}"
+
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                await self.rate_limiter.acquire()
+
+                async with session.get(
+                    download_url,
+                    headers={"Referer": referer},
+                    timeout=self.timeout,
+                ) as response:
+                    response.raise_for_status()
+
+                    # Get content length from GET response
+                    content_length = int(response.headers.get("Content-Length", 0))
+
+                    if not file_exists and content_length > 0:
+                        remote_size = content_length
+                        self.logger.debug(
+                            f"Set file size from GET response: {content_length} bytes"
+                        )  # no context
+
+                    if file_exists and remote_size and content_length > 0:
+                        if content_length != remote_size:
+                            self.logger.warning(
+                                f"Content-Length mismatch: HEAD {remote_size} vs GET {content_length}"
+                            )  # no context
+
+                    async with aiofiles.open(temp_path, "wb") as f:
+                        if self.config.chunk_size is None:
+                            # Single write
+                            content = await response.read()
+                            await f.write(content)
+                        else:
+                            # Chunked write
+                            total_downloaded = 0
+                            async for chunk in response.content.iter_chunked(
+                                self.config.chunk_size
+                            ):
+                                await f.write(chunk)
+                                total_downloaded += len(chunk)
+
+                    actual_size = temp_path.stat().st_size
+                    if remote_size and remote_size > 0 and actual_size != remote_size:
+                        raise ValueError(
+                            f"Size mismatch: expected {remote_size}, got {actual_size}"
+                        )
+
+                    temp_path.rename(file_path)
+
+                    if file_exists:
+                        self.logger.info(
+                            f"Successfully re-downloaded {context.lower()}: {file_path.name}"
+                        )
+                    else:
+                        self.logger.info(
+                            f"Successfully downloaded {context.lower()}: {file_path.name}"
+                        )
+                    return True
+
+            except Exception as e:
+                # Clean up temp file on error
+                if temp_path.exists():
+                    temp_path.unlink()
+
+                if attempt < self.config.max_retries:
+                    wait_time = 2**attempt
+                    self.logger.warning(
+                        f"{context} download failed (attempt {attempt + 1}/{self.config.max_retries + 1}): {e}. Retrying in {wait_time}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    self.logger.error(
+                        f"{context} download failed after {self.config.max_retries} retries: {e}"
+                    )
+                    return False
+
+        return False
+
+
+class ArtworkDownloader(BaseDownloader):
+    """Handles artwork downloading functionality."""
+
+    async def _get_artwork_list(
+        self, soup: BeautifulSoup, album_url: str
+    ) -> List[ArtworkInfo]:
+        """Extract artwork list from album page."""
+        artworks = []
+
+        try:
+            # Find all album images in the page
+            album_images = soup.find_all("div", class_="albumImage")
+
+            for img_div in album_images:
+                img_link = img_div.find("a", href=True)
+                if img_link:
+                    img_url = urljoin(album_url, img_link["href"])
+
+                    # Skip thumbnail URLs
+                    if "/thumbs/" in img_url:
+                        self.logger.debug(f"Skipping thumbnail: {img_url}")
+                        continue
+
+                    filename = self._sanitize_filename(
+                        Path(unquote(urlparse(img_url).path)).name
+                    )
+
+                    artwork = ArtworkInfo(url=img_url, filename=filename)
+                    artworks.append(artwork)
+                    self.logger.debug(f"Found artwork: {filename} -> {img_url}")
+
+        except Exception as e:
+            self.logger.warning(
+                f"Error extracting artworks: {e}. Continuing without artworks..."
+            )
+
+        return artworks
+
+    async def _download_artwork(
+        self,
+        session: aiohttp.ClientSession,
+        artwork: ArtworkInfo,
+        album_dir: Path,
+        album_url: str,
+    ) -> bool:
+        """Download a single artwork."""
+        async with self.semaphore:
+            file_path = album_dir / artwork.filename
+            return await self._download_file(
+                session, artwork.url, file_path, album_url, context="Artwork"
+            )
+
+    async def download_artworks(
+        self,
+        session: aiohttp.ClientSession,
+        artworks: List[ArtworkInfo],
+        album_dir: Path,
+        album_url: str,
+    ) -> Tuple[int, int]:
+        """Download all artworks for an album."""
+        if not artworks:
+            return 0, 0
+
+        self.logger.info(f"Downloading {len(artworks)} artwork(s)...")
+
+        download_tasks = []
+        for artwork in artworks:
+            task = self._download_artwork(session, artwork, album_dir, album_url)
+            download_tasks.append(task)
+
+        results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        # Count successes
+        successful = sum(1 for r in results if r is True)
+        failed = len(artworks) - successful
+
+        if successful > 0:
+            self.logger.info(
+                f"Artworks completed: {successful}/{len(artworks)} downloaded successfully"
+            )
+        if failed > 0:
+            self.logger.warning(f"{failed} artwork(s) failed to download")
+
+        return successful, failed
+
+
+class TrackDownloader(BaseDownloader):
+    """Handles track downloading functionality."""
 
     def _is_multi_disc(self, tracks: List[TrackInfo]) -> bool:
         """Check if album has multiple discs."""
@@ -314,7 +617,7 @@ class KhinsiderDownloader:
         """Format track number with proper padding."""
         return f"{track_number:0{padding}d}"
 
-    def _sanitize_filename(
+    def _sanitize_track_filename(
         self,
         name: str,
         is_temp: bool = False,
@@ -322,12 +625,8 @@ class KhinsiderDownloader:
         disc_number: Optional[int] = None,
         padding: int = 2,
     ) -> str:
-        """Sanitize filename to be filesystem-safe."""
-        sanitized = re.sub(
-            self.config.invalid_chars_pattern,
-            self.config.invalid_chars_replacement,
-            name,
-        )
+        """Sanitize track filename to be filesystem-safe."""
+        sanitized_name = self._sanitize_filename(name, is_temp)
 
         if track_number is not None:
             formatted_track = self._format_track_number(track_number, padding)
@@ -338,64 +637,7 @@ class KhinsiderDownloader:
         else:
             prefix = ""
 
-        max_bytes = self.config.max_filename_bytes
-        if is_temp:
-            max_bytes -= 1  # Reserve one byte for the dot prefix
-
-        prefix_bytes = len(prefix.encode("utf-8"))
-        available_bytes = max_bytes - prefix_bytes
-
-        encoded_sanitized = sanitized.encode("utf-8")
-        if len(encoded_sanitized) > available_bytes:
-            truncated = encoded_sanitized[:available_bytes]
-            # Avoid breaking UTF-8 sequences
-            while truncated and truncated[-1] & 0x80 and not (truncated[-1] & 0x40):
-                truncated = truncated[:-1]
-            sanitized = truncated.decode("utf-8", errors="ignore")
-
-        return prefix + sanitized
-
-    def _get_track_context(self, track: TrackInfo) -> str:
-        """Get formatted track context for logging."""
-        if track.disc_number is not None:
-            return f"Disc {track.disc_number} Track {track.number:03d}: {track.name}"
-        else:
-            return f"Track {track.number:03d}: {track.name}"
-
-    async def _get_album_name(self, soup: BeautifulSoup, album_url: str) -> str:
-        """Extract album name from HTML with fallbacks."""
-        # Try multiple strategies to extract album name
-        strategies = [
-            # Strategy 1: h2 tag in pageContent
-            lambda: soup.select_one("#pageContent h2"),
-            # Strategy 2: title tag
-            lambda: soup.find("title"),
-            # Strategy 3: meta description
-            lambda: soup.find("meta", {"name": "description"}),
-        ]
-
-        for strategy in strategies:
-            element = strategy()
-            if element:
-                text = (
-                    element.get_text().strip()
-                    if hasattr(element, "get_text")
-                    else element.get("content", "")
-                )
-                if text:
-                    clean_text = re.sub(r"\s+", " ", text)
-                    clean_text = re.sub(r"MP3 - Download.*", "", clean_text)
-                    clean_text = clean_text.strip()
-                    if clean_text:
-                        self.logger.debug(
-                            f"Extracted album name via {strategy.__name__}: {clean_text}"
-                        )
-                        return self._sanitize_filename(clean_text)
-
-        # Fallback: use URL path
-        fallback = urlparse(album_url).path.split("/")[-1] or "unknown_album"
-        self.logger.warning(f"Using URL fallback for album name: {fallback}")
-        return self._sanitize_filename(fallback)
+        return prefix + sanitized_name
 
     async def _get_track_list(
         self, soup: BeautifulSoup, album_url: str
@@ -405,7 +647,7 @@ class KhinsiderDownloader:
         tracklist_table = soup.find("table", id="songlist")
 
         if not tracklist_table:
-            self.logger.error("Could not find tracklist table")
+            self.logger.error("Could not find tracklist table")  # Ooops!
             return tracks
 
         # Get all rows, skip header and footer
@@ -415,7 +657,7 @@ class KhinsiderDownloader:
         ]  # Skip footer
 
         if not rows:
-            self.logger.error("No track rows found")
+            self.logger.error("No track rows found")  # Ooops!
             return tracks
 
         first_row_cells = rows[0].find_all("td")
@@ -441,7 +683,7 @@ class KhinsiderDownloader:
                         break
 
         if track_name_index is None:
-            self.logger.error("Could not find track name column")
+            self.logger.error("Could not find track name column")  # Ooops!
             return tracks
 
         if track_name_index >= 3:
@@ -547,7 +789,7 @@ class KhinsiderDownloader:
         self, session: aiohttp.ClientSession, track: TrackInfo, album_url: str
     ) -> bool:
         """Get the best available download URL for a track."""
-        track_context = self._get_track_context(track)
+        track_context = DownloadContext.get_track_context(track)
 
         response = await self._make_request(session, track.page_url, album_url)
         if not response:
@@ -566,172 +808,28 @@ class KhinsiderDownloader:
             ):
                 download_links.append((href, text))
 
-        self.logger.debug(f"Found {len(download_links)} download links", track_context)
+        self.logger.debug(
+            f"{track_context}: Found {len(download_links)} download links"
+        )
 
         for fmt in self.config.preferred_formats:
             for href, text in download_links:
                 if f"download as {fmt}" in text:
                     download_url = urljoin(track.page_url, href)
                     self.logger.debug(
-                        f"Trying format {fmt}: {download_url}", track_context
+                        f"{track_context}: Trying format {fmt}: {download_url}"
                     )
 
                     track.download_url = download_url
                     track.file_extension = f".{fmt}"
                     self.logger.debug(
-                        f"Found download URL: {download_url}", track_context
+                        f"{track_context}: Found download URL: {download_url}"
                     )
                     return True
 
         self.logger.warning(
-            f"No preferred format found with accessible download", track_context
+            f"{track_context}: No preferred format found with accessible download"
         )
-        return False
-
-    async def _get_remote_file_size(
-        self, session: aiohttp.ClientSession, download_url: str, referer: str
-    ) -> Optional[int]:
-        """Get file size from remote server using HEAD request."""
-        response = await self._make_request(
-            session, download_url, referer, method="HEAD"
-        )
-        if response:
-            content_length = response.headers.get("Content-Length")
-            if content_length:
-                try:
-                    return int(content_length)
-                except ValueError:
-                    self.logger.debug(f"Invalid Content-Length: {content_length}")
-        return None
-
-    async def _should_skip_download(self, file_path: Path, expected_size: int) -> bool:
-        """Check if file already exists with correct size."""
-        if not file_path.exists():
-            return False
-
-        actual_size = file_path.stat().st_size
-        if actual_size == expected_size:
-            return True
-
-        self.logger.debug(
-            f"File size mismatch: local {actual_size} vs remote {expected_size}"
-        )
-        return False
-
-    async def _download_file(
-        self, session: aiohttp.ClientSession, track: TrackInfo, file_path: Path
-    ) -> bool:
-        """Download a file with progress tracking and verification."""
-        # Check if file exists and get local size for comparison
-        local_size = 0
-        file_exists = file_path.exists()
-        if file_exists:
-            local_size = file_path.stat().st_size
-            self.logger.debug(f"Local file exists with size: {local_size} bytes")
-
-        # For existing files, we need to check remote size first using HEAD
-        if file_exists:
-            remote_size = await self._get_remote_file_size(
-                session, track.download_url, track.page_url
-            )
-            if remote_size is not None:
-                if local_size == remote_size:
-                    self.logger.info(
-                        f"File already exists with correct size: {file_path.name}"
-                    )
-                    return True
-                else:
-                    self.logger.warning(
-                        f"File exists but size mismatch: local {local_size} vs remote {remote_size}. Redownloading."
-                    )
-                    track.file_size = remote_size
-            else:
-                self.logger.warning(
-                    "Could not get remote file size, proceeding with download"
-                )
-                # If we can't get remote size, proceed with download but don't set expected size
-
-        file_size_info = (
-            f" ({track.file_size / 1024 / 1024:.1f} MB)" if track.file_size > 0 else ""
-        )
-        self.logger.info(f"Downloading: {file_path.name}{file_size_info}")
-
-        temp_path = file_path.parent / f".{file_path.name}"
-
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                await self.rate_limiter.acquire()
-
-                async with session.get(
-                    track.download_url,
-                    headers={"Referer": track.page_url},
-                    timeout=self.timeout,
-                ) as response:
-                    response.raise_for_status()
-
-                    # Get content length from GET response
-                    content_length = int(response.headers.get("Content-Length", 0))
-
-                    # For new files, set the file size from the GET response
-                    if not file_exists and content_length > 0:
-                        track.file_size = content_length
-                        self.logger.debug(
-                            f"Set file size from GET response: {content_length} bytes"
-                        )
-
-                    if file_exists and track.file_size > 0 and content_length > 0:
-                        if content_length != track.file_size:
-                            self.logger.warning(
-                                f"Content-Length mismatch: HEAD {track.file_size} vs GET {content_length}"
-                            )
-
-                    async with aiofiles.open(temp_path, "wb") as f:
-                        if self.config.chunk_size is None:
-                            # Single write
-                            content = await response.read()
-                            await f.write(content)
-                        else:
-                            # Chunked write
-                            total_downloaded = 0
-                            async for chunk in response.content.iter_chunked(
-                                self.config.chunk_size
-                            ):
-                                await f.write(chunk)
-                                total_downloaded += len(chunk)
-
-                    actual_size = temp_path.stat().st_size
-                    if track.file_size > 0 and actual_size != track.file_size:
-                        raise ValueError(
-                            f"Size mismatch: expected {track.file_size}, got {actual_size}"
-                        )
-
-                    temp_path.rename(file_path)
-
-                    if file_exists:
-                        self.logger.info(
-                            f"Successfully re-downloaded: {file_path.name}"
-                        )
-                    else:
-                        self.logger.info(f"Successfully downloaded: {file_path.name}")
-                    return True
-
-            except Exception as e:
-                # Clean up temp file on error
-                if temp_path.exists():
-                    temp_path.unlink()
-
-                if attempt < self.config.max_retries:
-                    wait_time = 2**attempt
-                    self.logger.warning(
-                        f"Download failed (attempt {attempt + 1}/{self.config.max_retries + 1}): {e}. Retrying in {wait_time}s..."
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    self.logger.error(
-                        f"Download failed after {self.config.max_retries} retries: {e}"
-                    )
-                    return False
-
         return False
 
     async def _download_track(
@@ -744,18 +842,16 @@ class KhinsiderDownloader:
     ) -> bool:
         """Download a single track."""
         async with self.semaphore:
-            track_context = self._get_track_context(track)
-            self.logger.debug("Processing track", track_context)
+            track_context = DownloadContext.get_track_context(track)
 
             if not await self._get_download_info(session, track, album_url):
-                self.logger.error("Could not find download URL", track_context)
+                self.logger.error(
+                    f"{track_context}: Could not find download URL"
+                )  # Ooops!
                 return False
 
-            track_padding = padding_dict.get(
-                track.disc_number, 3
-            )  # Default to 3 if not found
-
-            sanitized_name = self._sanitize_filename(
+            track_padding = padding_dict.get(track.disc_number, 3)
+            sanitized_name = self._sanitize_track_filename(
                 track.name,
                 track_number=track.number,
                 disc_number=track.disc_number,
@@ -763,24 +859,125 @@ class KhinsiderDownloader:
             )
             file_path = album_dir / f"{sanitized_name}{track.file_extension}"
 
-            success = await self._download_file(session, track, file_path)
+            return await self._download_file(
+                session, track.download_url, file_path, track.page_url, context="Track"
+            )
 
-            if success:
-                self.logger.debug("Completed", track_context)
+    async def download_tracks(
+        self,
+        session: aiohttp.ClientSession,
+        soup: BeautifulSoup,
+        album_dir: Path,
+        album_url: str,
+    ) -> Tuple[int, int]:
+        """Download all tracks for an album."""
+        tracks = await self._get_track_list(soup, album_url)
+        if not tracks:
+            self.logger.error("No tracks found in album")  # Ooops!
+            return 0, 0
+
+        padding_dict = self._calculate_track_padding(tracks)
+
+        self._display_tracklist(tracks)
+
+        download_tasks = []
+        for track in tracks:
+            task = self._download_track(
+                session, track, album_dir, album_url, padding_dict
+            )
+            download_tasks.append(task)
+
+        results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        # Count successes
+        successful = sum(1 for r in results if r is True)
+        failed = len(tracks) - successful
+
+        self.logger.info(
+            f"Tracks completed: {successful}/{len(tracks)} downloaded successfully"
+        )
+        if failed > 0:
+            self.logger.warning(f"{failed} tracks failed to download")
+
+        return successful, failed
+
+    def _display_tracklist(self, tracks: List[TrackInfo]) -> None:
+        """Display the tracklist efficiently in a single call."""
+        track_entries = []
+        for track in tracks:
+            if track.disc_number is not None:
+                track_entries.append(
+                    f"{track.disc_number}-{track.number:03d}. {track.name}"
+                )
             else:
-                self.logger.error("Failed", track_context)
+                track_entries.append(f"{track.number:03d}. {track.name}")
 
-            return success
+        tracklist_text = "\n".join(track_entries)
+        self.logger.info(
+            f"Tracklist ({len(tracks)} tracks):", extra={"tracklist": True}
+        )
+        self.logger.info(tracklist_text, extra={"tracklist_content": True})
+
+
+class KhinsiderDownloader:
+    """Main downloader class for Khinsider albums."""
+
+    def __init__(self, config: Config, logger: Optional[logging.Logger] = None) -> None:
+        """Initialize the downloader."""
+        self.config = config
+        self.logger = logger or logging.getLogger("khinsider_downloader")
+        self.rate_limiter = RateLimiter(config.rate_limit, config.jitter_percent)
+
+        # Initialize specialized downloaders
+        self.artwork_downloader = ArtworkDownloader(
+            config, self.logger, self.rate_limiter
+        )
+        self.track_downloader = TrackDownloader(config, self.logger, self.rate_limiter)
+
+    async def _get_album_name(self, soup: BeautifulSoup, album_url: str) -> str:
+        """Extract album name from HTML with fallbacks."""
+        # Try multiple strategies to extract album name
+        strategies = [
+            # Strategy 1: h2 tag in pageContent
+            lambda: soup.select_one("#pageContent h2"),
+            # Strategy 2: title tag
+            lambda: soup.find("title"),
+            # Strategy 3: meta description
+            lambda: soup.find("meta", {"name": "description"}),
+        ]
+
+        for strategy in strategies:
+            element = strategy()
+            if element:
+                text = (
+                    element.get_text().strip()
+                    if hasattr(element, "get_text")
+                    else element.get("content", "")
+                )
+                if text:
+                    clean_text = re.sub(r"\s+", " ", text)
+                    clean_text = re.sub(r"MP3 - Download.*", "", clean_text)
+                    clean_text = clean_text.strip()
+                    if clean_text:
+                        self.logger.debug(
+                            f"Extracted album name via {strategy.__name__}: {clean_text}"
+                        )
+                        return self.artwork_downloader._sanitize_filename(clean_text)
+
+        # Fallback: use URL path
+        fallback = urlparse(album_url).path.split("/")[-1] or "unknown_album"
+        self.logger.warning(f"Using URL fallback for album name: {fallback}")
+        return self.artwork_downloader._sanitize_filename(fallback)
 
     async def download_album(self, album_url: str) -> bool:
-        """Download all tracks from an album."""
+        """Download all artworks and tracks from an album."""
         self.logger.info(f"Processing album: {album_url}")
 
         connector = TCPConnector(limit=self.config.max_concurrency * 2)
         async with aiohttp.ClientSession(
-            connector=connector, headers=self.headers
+            connector=connector, headers=self.artwork_downloader.headers
         ) as session:
-            response = await self._make_request(
+            response = await self.artwork_downloader._make_request(
                 session, album_url, self.config.base_referer
             )
             if not response:
@@ -793,36 +990,40 @@ class KhinsiderDownloader:
             album_dir = self.config.output_path / album_name
             album_dir.mkdir(parents=True, exist_ok=True)
 
-            tracks = await self._get_track_list(soup, album_url)
+            tracks = await self.track_downloader._get_track_list(soup, album_url)
             if not tracks:
-                self.logger.error("No tracks found in album")
+                self.logger.error("No tracks found in album")  # Ooops!
                 return False
 
-            padding_dict = self._calculate_track_padding(tracks)
+            artworks = await self.artwork_downloader._get_artwork_list(soup, album_url)
+            padding_dict = self.track_downloader._calculate_track_padding(tracks)
 
-            self._display_album_info(album_name, album_dir, tracks, padding_dict)
-            self._display_tracklist(tracks)
+            self._display_album_info(
+                album_name, album_dir, tracks, padding_dict, len(artworks)
+            )
 
-            download_tasks = []
-            for track in tracks:
-                task = self._download_track(
-                    session, track, album_dir, album_url, padding_dict
+            # Download artworks
+            artwork_success, artwork_failed = (
+                await self.artwork_downloader.download_artworks(
+                    session, artworks, album_dir, album_url
                 )
-                download_tasks.append(task)
+            )
 
-            results = await asyncio.gather(*download_tasks, return_exceptions=True)
+            # Download tracks
+            track_success, track_failed = await self.track_downloader.download_tracks(
+                session, soup, album_dir, album_url
+            )
 
-            # Count successes
-            successful = sum(1 for r in results if r is True)
-            failed = len(tracks) - successful
+            total_success = artwork_success + track_success
+            total_failed = artwork_failed + track_failed
 
             self.logger.info(
-                f"Album completed: {successful}/{len(tracks)} tracks downloaded successfully"
+                f"Album completed: {track_success}/{len(tracks)} tracks, {artwork_success}/{len(artworks)} artworks downloaded successfully"
             )
-            if failed > 0:
-                self.logger.warning(f"{failed} tracks failed to download")
+            if total_failed > 0:
+                self.logger.warning(f"{total_failed} items failed to download")
 
-            return failed == 0
+            return track_failed == 0  # Consider album success if all tracks downloaded
 
     def _display_album_info(
         self,
@@ -830,9 +1031,10 @@ class KhinsiderDownloader:
         album_dir: Path,
         tracks: List[TrackInfo],
         padding_dict: Dict[Optional[int], int],
+        artwork_count: int,
     ) -> None:
         """Display album information and configuration."""
-        is_multi_disc = self._is_multi_disc(tracks)
+        is_multi_disc = self.track_downloader._is_multi_disc(tracks)
         disc_numbers = sorted(
             {track.disc_number for track in tracks if track.disc_number is not None}
         )
@@ -848,6 +1050,7 @@ class KhinsiderDownloader:
         lines.append(("Album", album_name, "key_value"))
         lines.append(("Output", str(album_dir), "key_value"))
         lines.append(("Tracks", str(len(tracks)), "key_value"))
+        lines.append(("Artworks", str(artwork_count), "key_value"))
         lines.append(
             (
                 "Discs",
@@ -912,23 +1115,6 @@ class KhinsiderDownloader:
                 self.logger.info(
                     "", extra={"key_value": True, "key": key, "value": value}
                 )
-
-    def _display_tracklist(self, tracks: List[TrackInfo]) -> None:
-        """Display the tracklist efficiently in a single call."""
-        track_entries = []
-        for track in tracks:
-            if track.disc_number is not None:
-                track_entries.append(
-                    f"{track.disc_number}-{track.number:03d}. {track.name}"
-                )
-            else:
-                track_entries.append(f"{track.number:03d}. {track.name}")
-
-        tracklist_text = "\n".join(track_entries)
-        self.logger.info(
-            f"Tracklist ({len(tracks)} tracks):", extra={"tracklist": True}
-        )
-        self.logger.info(tracklist_text, extra={"tracklist_content": True})
 
 
 async def main() -> None:
