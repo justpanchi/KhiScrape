@@ -58,7 +58,7 @@ python3 khiscrape.py \
 | `-r, --rate-limit RPS` | Requests per second | `2.0` |
 | `-j, --jitter JITTER` | Jitter as percentage of base delay | `70%` |
 | `-f, --formats LIST` | Preferred formats in order | `flac,wav,m4a,opus,ogg,aac,mp3` |
-| `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `524288` (512KB) |
+| `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `524288` (512KiB) |
 | `-m, --max-retries NUM` | Retry attempts | `3` |
 | `-t, --track-padding NUM` | Track number padding (1-4 digits) | Auto-detect |
 | `-p, --padding-mode MODE` | Multi-disc padding: `disc` or `total` | `disc` |
