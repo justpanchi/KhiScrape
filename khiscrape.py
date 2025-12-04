@@ -24,6 +24,14 @@ from colorama import Fore, Style, init
 init(autoreset=True)
 
 
+try:
+    import lxml  # noqa: F401
+
+    LXML_AVAILABLE = True
+except ImportError:
+    LXML_AVAILABLE = False
+
+
 @dataclass(frozen=True)
 class Config:
     """Immutable configuration container."""
@@ -40,7 +48,7 @@ class Config:
         "mp3",
     )
     max_concurrency: int = 4
-    chunk_size: Optional[int] = 512 * 1024  # 512 KB
+    chunk_size: Optional[int] = 512 * 1024  # 512 KiB
     connection_timeout: float = 15.0
     total_timeout: float = 180.0
     read_timeout: float = 60.0
@@ -51,12 +59,139 @@ class Config:
     invalid_chars_replacement: str = "_"
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/142.0.7444.60 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/143.0.7499.40 Safari/537.36"
     )
     base_referer: str = "https://downloads.khinsider.com/"
     debug: bool = False
     track_padding: Optional[int] = None  # None = auto-detect
     padding_mode: str = "disc"  # "disc" or "total"
+    html_parser: str = field(
+        default_factory=lambda: "lxml" if LXML_AVAILABLE else "html.parser"
+    )
+
+    def __post_init__(self) -> None:
+        """Validate configuration values after initialization."""
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate all configuration parameters."""
+        if not isinstance(self.output_path, Path):
+            raise ValueError(
+                f"output_path must be a Path object, got {type(self.output_path)}"
+            )
+
+        if not isinstance(self.max_filename_bytes, int) or self.max_filename_bytes < 1:
+            raise ValueError(
+                f"max_filename_bytes must be a positive integer, got {self.max_filename_bytes}"
+            )
+
+        if not isinstance(self.preferred_formats, tuple):
+            raise ValueError(
+                f"preferred_formats must be a tuple, got {type(self.preferred_formats)}"
+            )
+        if not self.preferred_formats:
+            raise ValueError("preferred_formats must not be empty")
+        for fmt in self.preferred_formats:
+            if not isinstance(fmt, str) or not fmt:
+                raise ValueError(
+                    f"All preferred_formats must be non-empty strings, got {self.preferred_formats}"
+                )
+
+        if not isinstance(self.max_concurrency, int) or self.max_concurrency < 1:
+            raise ValueError(
+                f"max_concurrency must be at least 1, got {self.max_concurrency}"
+            )
+
+        if self.chunk_size is not None:
+            if not isinstance(self.chunk_size, int) or self.chunk_size <= 0:
+                raise ValueError(
+                    f"chunk_size must be positive integer or None, got {self.chunk_size}"
+                )  # 0 → None in main()
+
+        for timeout_name, timeout_value in [
+            ("connection_timeout", self.connection_timeout),
+            ("total_timeout", self.total_timeout),
+            ("read_timeout", self.read_timeout),
+        ]:
+            if not isinstance(timeout_value, (int, float)) or timeout_value <= 0:
+                raise ValueError(
+                    f"{timeout_name} must be positive number, got {timeout_value}"
+                )
+
+        if not isinstance(self.max_retries, int) or self.max_retries < 0:
+            raise ValueError(
+                f"max_retries must be non-negative integer, got {self.max_retries}"
+            )
+
+        if not isinstance(self.rate_limit, (int, float)) or self.rate_limit <= 0:
+            raise ValueError(
+                f"rate_limit must be positive number, got {self.rate_limit}"
+            )
+
+        if not isinstance(self.jitter_percent, (int, float)) or not (
+            0 <= self.jitter_percent <= 100
+        ):
+            raise ValueError(
+                f"jitter_percent must be between 0 and 100, got {self.jitter_percent}"
+            )
+
+        if (
+            not isinstance(self.invalid_chars_pattern, str)
+            or not self.invalid_chars_pattern
+        ):
+            raise ValueError(
+                f"invalid_chars_pattern must be non-empty string, got {self.invalid_chars_pattern}"
+            )
+
+        if not isinstance(self.invalid_chars_replacement, str):
+            raise ValueError(
+                f"invalid_chars_replacement must be string, got {type(self.invalid_chars_replacement)}"
+            )
+
+        if not isinstance(self.user_agent, str) or not self.user_agent:
+            raise ValueError(
+                f"user_agent must be non-empty string, got {self.user_agent}"
+            )
+
+        if not isinstance(self.base_referer, str) or not self.base_referer:
+            raise ValueError(
+                f"base_referer must be non-empty string, got {self.base_referer}"
+            )
+
+        if self.track_padding is not None:
+            if not isinstance(self.track_padding, int) or not (
+                1 <= self.track_padding <= 4
+            ):
+                raise ValueError(
+                    f"track_padding must be between 1 and 4 or None, got {self.track_padding}"
+                )
+
+        if not isinstance(self.padding_mode, str) or self.padding_mode not in (
+            "disc",
+            "total",
+        ):
+            raise ValueError(
+                f"padding_mode must be 'disc' or 'total', got {self.padding_mode}"
+            )
+
+        if not isinstance(self.debug, bool):
+            raise ValueError(f"debug must be boolean, got {type(self.debug)}")
+
+        if not isinstance(self.html_parser, str):
+            raise ValueError(
+                f"html_parser must be string, got {type(self.html_parser)}"
+            )
+
+        valid_parsers = ["html.parser", "lxml", "html5lib"]
+        if self.html_parser not in valid_parsers:
+            raise ValueError(
+                f"html_parser must be one of {valid_parsers}, got {self.html_parser}"
+            )
+
+        if self.html_parser == "lxml" and not LXML_AVAILABLE:
+            raise ValueError(
+                "lxml parser requested but lxml is not installed. Falling back to html.parser."
+            )
 
 
 @dataclass
@@ -74,7 +209,7 @@ class TrackInfo:
 
 @dataclass
 class ArtworkInfo:
-    """Information about an artwork."""
+    """Information about a single artwork."""
 
     url: str
     filename: str
@@ -186,7 +321,7 @@ class DownloadContext:
 
     @staticmethod
     def get_track_context(track: TrackInfo) -> str:
-        """Get simple track context for logging."""
+        """Get track context for logging."""
         if track.disc_number is not None:
             return f"Track {track.disc_number}-{track.number:03d}"
         else:
@@ -228,6 +363,10 @@ class BaseDownloader:
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "same-origin",
         }
+
+    def _make_soup(self, html: str) -> BeautifulSoup:
+        """Create BeautifulSoup object using configured parser."""
+        return BeautifulSoup(html, self.config.html_parser)
 
     async def _make_request(
         self,
@@ -367,15 +506,6 @@ class BaseDownloader:
                     f"Could not get remote {context.lower()} size, proceeding with download"
                 )
 
-        file_size_info = (
-            f" ({remote_size / 1024 / 1024:.1f} MB)"
-            if remote_size and remote_size > 0
-            else ""
-        )
-        self.logger.info(
-            f"Downloading {context.lower()}: {file_path.name}{file_size_info}"
-        )
-
         temp_path = file_path.parent / f".{file_path.name}"
 
         for attempt in range(self.config.max_retries + 1):
@@ -403,6 +533,15 @@ class BaseDownloader:
                             self.logger.warning(
                                 f"Content-Length mismatch: HEAD {remote_size} vs GET {content_length}"
                             )  # no context
+
+                    file_size_info = (
+                        f" ({content_length / 1024 / 1024:.1f} MiB)"
+                        if content_length > 0
+                        else ""
+                    )
+                    self.logger.info(
+                        f"Downloading {context.lower()}: {file_path.name}{file_size_info}"
+                    )
 
                     async with aiofiles.open(temp_path, "wb") as f:
                         if self.config.chunk_size is None:
@@ -796,7 +935,7 @@ class TrackDownloader(BaseDownloader):
             return False
 
         html = await response.text()
-        soup = BeautifulSoup(html, "html.parser")
+        soup = self._make_soup(html)
 
         download_links = []
         for link in soup.find_all("a", href=True):
@@ -880,6 +1019,8 @@ class TrackDownloader(BaseDownloader):
 
         self._display_tracklist(tracks)
 
+        self.logger.info(f"Downloading {len(tracks)} track(s)...")
+
         download_tasks = []
         for track in tracks:
             task = self._download_track(
@@ -934,6 +1075,10 @@ class KhinsiderDownloader:
         )
         self.track_downloader = TrackDownloader(config, self.logger, self.rate_limiter)
 
+    def _make_soup(self, html: str) -> BeautifulSoup:
+        """Create BeautifulSoup object using configured parser."""
+        return BeautifulSoup(html, self.config.html_parser)
+
     async def _get_album_name(self, soup: BeautifulSoup, album_url: str) -> str:
         """Extract album name from HTML with fallbacks."""
         # Try multiple strategies to extract album name
@@ -984,7 +1129,7 @@ class KhinsiderDownloader:
                 return False
 
             html = await response.text()
-            soup = BeautifulSoup(html, "html.parser")
+            soup = self._make_soup(html)
 
             album_name = await self._get_album_name(soup, album_url)
             album_dir = self.config.output_path / album_name
@@ -1099,6 +1244,7 @@ class KhinsiderDownloader:
         lines.append(
             ("Chunk Size", str(self.config.chunk_size or "Single write"), "key_value")
         )
+        lines.append(("HTML Parser", self.config.html_parser, "key_value"))
         lines.append(("=" * 60, "separator"))
 
         for line in lines:
@@ -1207,6 +1353,14 @@ Examples:
     )
 
     parser.add_argument(
+        "-b",
+        "--html-parser",
+        type=str,
+        choices=["html.parser", "lxml", "html5lib"],
+        help="HTML parser to use (default: lxml, fallback: html.parser)",
+    )
+
+    parser.add_argument(
         "-d", "--debug", action="store_true", help="Enable debug output"
     )
 
@@ -1215,29 +1369,26 @@ Examples:
     # Set up logging for CLI usage
     logger = setup_logging(args.debug)
 
-    config = Config(
-        output_path=args.output,
-        max_concurrency=args.concurrency,
-        rate_limit=args.rate_limit,
-        jitter_percent=args.jitter,
-        preferred_formats=tuple(args.formats),
-        chunk_size=args.chunk_size if args.chunk_size != 0 else None,
-        max_retries=args.max_retries,
-        track_padding=args.track_padding,
-        padding_mode=args.padding_mode,
-        debug=args.debug,
-    )
-
-    if config.max_concurrency < 1:
-        print(f"{Fore.RED}Error: Concurrency must be at least 1", file=sys.stderr)
-        sys.exit(1)
-
-    if config.rate_limit <= 0:
-        print(f"{Fore.RED}Error: Rate limit must be positive", file=sys.stderr)
-        sys.exit(1)
-
-    if config.jitter_percent < 0 or config.jitter_percent > 100:
-        print(f"{Fore.RED}Error: Jitter must be between 0 and 100", file=sys.stderr)
+    try:
+        config = Config(
+            output_path=args.output,
+            max_concurrency=args.concurrency,
+            rate_limit=args.rate_limit,
+            jitter_percent=args.jitter,
+            preferred_formats=tuple(args.formats),
+            chunk_size=args.chunk_size if args.chunk_size != 0 else None,
+            max_retries=args.max_retries,
+            track_padding=args.track_padding,
+            padding_mode=args.padding_mode,
+            html_parser=(
+                args.html_parser
+                if args.html_parser
+                else ("lxml" if LXML_AVAILABLE else "html.parser")
+            ),
+            debug=args.debug,
+        )
+    except ValueError as e:
+        print(f"{Fore.RED}Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Pass the configured logger to the downloader
