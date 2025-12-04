@@ -23,7 +23,7 @@ Asynchronous Python script to download complete game soundtracks from [Khinsider
 - **Track Number Padding** - Auto-detection or manual control over track numbering
 - **Multi-Disc Padding Modes** - Padding per-disc or total track count
 - **Chunked Downloads** - Configurable chunk sizes for large files
-- **HTML Parser** - Configurable parser for BeautifulSoup (`lxml`, `html.parser`, `html5lib`)
+- **HTML Parser** - Configurable parser for BeautifulSoup
 
 ## 🚀 Quick Start
 
