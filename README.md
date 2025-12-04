@@ -23,6 +23,7 @@ Asynchronous Python script to download complete game soundtracks from [Khinsider
 - **Track Number Padding** - Auto-detection or manual control over track numbering
 - **Multi-Disc Padding Modes** - Padding per-disc or total track count
 - **Chunked Downloads** - Configurable chunk sizes for large files
+- **HTML Parser** - Configurable parser for BeautifulSoup (`lxml`, `html.parser`, `html5lib`)
 
 ## 🚀 Quick Start
 
@@ -61,6 +62,7 @@ python3 khiscrape.py \
 | `-m, --max-retries NUM` | Retry attempts | `3` |
 | `-t, --track-padding NUM` | Track number padding (1-4 digits) | Auto-detect |
 | `-p, --padding-mode MODE` | Multi-disc padding: `disc` or `total` | `disc` |
+| `-b, --html-parser PARSER` | HTML parser to use (`lxml`, `html.parser`, `html5lib`) | `lxml` (fallback: `html.parser`) |
 | `-d, --debug` | Enable debug output | `False` |
 
 ## 🛠️ Technical Details
