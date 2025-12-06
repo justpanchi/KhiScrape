@@ -697,7 +697,16 @@ class TrackDownloader(BaseDownloader):
         """Calculate track number padding per disc based on padding mode and track data."""
         if self.config.track_padding is not None:
             # Manual padding overrides everything
-            return {None: self.config.track_padding}
+            manual_padding = self.config.track_padding
+            if self._is_multi_disc(tracks):
+                disc_numbers = {
+                    track.disc_number
+                    for track in tracks
+                    if track.disc_number is not None
+                }
+                return {disc: manual_padding for disc in disc_numbers}
+            else:
+                return {None: manual_padding}
 
         is_multi_disc = self._is_multi_disc(tracks)
 
@@ -714,16 +723,17 @@ class TrackDownloader(BaseDownloader):
                 return {None: 4}
 
         if self.config.padding_mode == "total":
-            # Total padding: use maximum track number across all discs
-            max_track_number = max(track.number for track in tracks)
-            if max_track_number < 10:
+            # Total padding: use total number of tracks across all discs
+            total_tracks = len(tracks)
+            if total_tracks < 10:
                 padding = 1
-            elif max_track_number < 100:
+            elif total_tracks < 100:
                 padding = 2
-            elif max_track_number < 1000:
+            elif total_tracks < 1000:
                 padding = 3
             else:
                 padding = 4
+
             disc_numbers = {
                 track.disc_number for track in tracks if track.disc_number is not None
             }
@@ -989,7 +999,9 @@ class TrackDownloader(BaseDownloader):
                 )  # Ooops!
                 return False
 
-            track_padding = padding_dict.get(track.disc_number, 3)
+            track_padding = padding_dict.get(
+                track.disc_number, 3
+            )  # Default to 3 if not found
             sanitized_name = self._sanitize_track_filename(
                 track.name,
                 track_number=track.number,
@@ -1017,7 +1029,7 @@ class TrackDownloader(BaseDownloader):
 
         padding_dict = self._calculate_track_padding(tracks)
 
-        self._display_tracklist(tracks)
+        self._display_tracklist(tracks, padding_dict)
 
         self.logger.info(f"Downloading {len(tracks)} track(s)...")
 
@@ -1042,16 +1054,22 @@ class TrackDownloader(BaseDownloader):
 
         return successful, failed
 
-    def _display_tracklist(self, tracks: List[TrackInfo]) -> None:
+    def _display_tracklist(
+        self, tracks: List[TrackInfo], padding_dict: Dict[Optional[int], int]
+    ) -> None:
         """Display the tracklist efficiently in a single call."""
         track_entries = []
         for track in tracks:
+            track_padding = padding_dict.get(
+                track.disc_number, 3
+            )  # Default to 3 if not found
+            formatted_track = self._format_track_number(track.number, track_padding)
             if track.disc_number is not None:
                 track_entries.append(
-                    f"{track.disc_number}-{track.number:03d}. {track.name}"
+                    f"{track.disc_number}-{formatted_track}. {track.name}"
                 )
             else:
-                track_entries.append(f"{track.number:03d}. {track.name}")
+                track_entries.append(f"{formatted_track}. {track.name}")
 
         tracklist_text = "\n".join(track_entries)
         self.logger.info(
@@ -1204,7 +1222,15 @@ class KhinsiderDownloader:
             )
         )
 
-        if is_multi_disc:
+        if self.config.track_padding is not None:
+            lines.append(
+                (
+                    "Track Padding",
+                    f"{self.config.track_padding} digit(s) (manual override)",
+                    "key_value",
+                )
+            )
+        elif is_multi_disc:
             if self.config.padding_mode == "total":
                 first_padding = next(iter(padding_dict.values()))
                 lines.append(
@@ -1225,7 +1251,8 @@ class KhinsiderDownloader:
             padding = padding_dict.get(None, 2)
             lines.append(("Track Padding", f"{padding} digit(s)", "key_value"))
 
-        lines.append(("Padding Mode", self.config.padding_mode, "key_value"))
+        if self.config.track_padding is None:
+            lines.append(("Padding Mode", self.config.padding_mode, "key_value"))
         lines.append(("-" * 60, "separator"))
         lines.append(("CONFIGURATION", "header"))
         lines.append(("-" * 60, "separator"))
