@@ -8,10 +8,8 @@ import random
 import re
 import sys
 import time
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
 from urllib.parse import urljoin, urlparse, unquote
 
 import aiofiles
@@ -32,23 +30,25 @@ except ImportError:
     LXML_AVAILABLE = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Config:
     """Immutable configuration container."""
 
     output_path: Path = Path("KhiScrape")
     max_filename_bytes: int = 255
-    preferred_formats: Tuple[str, ...] = (
-        "flac",
-        "wav",
-        "m4a",
-        "opus",
-        "ogg",
-        "aac",
-        "mp3",
+    preferred_formats: tuple[str, ...] = field(
+        default=(
+            "flac",
+            "wav",
+            "m4a",
+            "opus",
+            "ogg",
+            "aac",
+            "mp3",
+        )
     )
     max_concurrency: int = 4
-    chunk_size: Optional[int] = 512 * 1024  # 512 KiB
+    chunk_size: int | None = 512 * 1024  # 512 KiB
     connection_timeout: float = 15.0
     total_timeout: float = 180.0
     read_timeout: float = 60.0
@@ -57,13 +57,15 @@ class Config:
     jitter_percent: float = 70.0  # Jitter as percentage of base delay
     invalid_chars_pattern: str = r'[\\/*?:"<>|]'
     invalid_chars_replacement: str = "_"
-    user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/143.0.7499.40 Safari/537.36"
+    user_agent: str = field(
+        default=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/143.0.7499.40 Safari/537.36"
+        )
     )
     base_referer: str = "https://downloads.khinsider.com/"
     debug: bool = False
-    track_padding: Optional[int] = None  # None = auto-detect
+    track_padding: int | None = None  # None = auto-detect
     padding_mode: str = "disc"  # "disc" or "total"
     html_parser: str = field(
         default_factory=lambda: "lxml" if LXML_AVAILABLE else "html.parser"
@@ -194,20 +196,20 @@ class Config:
             )
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class TrackInfo:
     """Information about a single track."""
 
     number: int
     name: str
     page_url: str
-    disc_number: Optional[int] = None
-    download_url: Optional[str] = None
+    disc_number: int | None = None
+    download_url: str | None = None
     file_size: int = 0
     file_extension: str = ""
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class ArtworkInfo:
     """Information about a single artwork."""
 
@@ -270,7 +272,7 @@ class ColorFormatter(logging.Formatter):
 
 
 def setup_logging(
-    debug: bool = False, logger: Optional[logging.Logger] = None
+    debug: bool = False, logger: logging.Logger | None = None
 ) -> logging.Logger:
     """Set up logging for the application."""
     if logger is None:
@@ -372,9 +374,9 @@ class BaseDownloader:
         self,
         session: aiohttp.ClientSession,
         url: str,
-        referer: Optional[str] = None,
+        referer: str | None = None,
         method: str = "GET",
-    ) -> Optional[aiohttp.ClientResponse]:
+    ) -> aiohttp.ClientResponse | None:
         """Make an HTTP request with rate limiting and error handling."""
         await self.rate_limiter.acquire()
 
@@ -411,7 +413,7 @@ class BaseDownloader:
 
     async def _get_remote_file_size(
         self, session: aiohttp.ClientSession, download_url: str, referer: str
-    ) -> Optional[int]:
+    ) -> int | None:
         """Get file size from remote server using HEAD request."""
         response = await self._make_request(
             session, download_url, referer, method="HEAD"
@@ -600,7 +602,7 @@ class ArtworkDownloader(BaseDownloader):
 
     async def _get_artwork_list(
         self, soup: BeautifulSoup, album_url: str
-    ) -> List[ArtworkInfo]:
+    ) -> list[ArtworkInfo]:
         """Extract artwork list from album page."""
         artworks = []
 
@@ -650,10 +652,10 @@ class ArtworkDownloader(BaseDownloader):
     async def download_artworks(
         self,
         session: aiohttp.ClientSession,
-        artworks: List[ArtworkInfo],
+        artworks: list[ArtworkInfo],
         album_dir: Path,
         album_url: str,
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """Download all artworks for an album."""
         if not artworks:
             return 0, 0
@@ -684,7 +686,7 @@ class ArtworkDownloader(BaseDownloader):
 class TrackDownloader(BaseDownloader):
     """Handles track downloading functionality."""
 
-    def _is_multi_disc(self, tracks: List[TrackInfo]) -> bool:
+    def _is_multi_disc(self, tracks: list[TrackInfo]) -> bool:
         """Check if album has multiple discs."""
         disc_numbers = {
             track.disc_number for track in tracks if track.disc_number is not None
@@ -692,8 +694,8 @@ class TrackDownloader(BaseDownloader):
         return len(disc_numbers) > 1
 
     def _calculate_track_padding(
-        self, tracks: List[TrackInfo]
-    ) -> Dict[Optional[int], int]:
+        self, tracks: list[TrackInfo]
+    ) -> dict[int | None, int]:
         """Calculate track number padding per disc based on padding mode and track data."""
         if self.config.track_padding is not None:
             # Manual padding overrides everything
@@ -741,7 +743,7 @@ class TrackDownloader(BaseDownloader):
 
         else:
             # Per-disc padding: calculate padding separately for each disc
-            disc_tracks: Dict[Optional[int], List[TrackInfo]] = {}
+            disc_tracks: dict[int | None, list[TrackInfo]] = {}
             for track in tracks:
                 disc_num = track.disc_number
                 if disc_num not in disc_tracks:
@@ -770,8 +772,8 @@ class TrackDownloader(BaseDownloader):
         self,
         name: str,
         is_temp: bool = False,
-        track_number: Optional[int] = None,
-        disc_number: Optional[int] = None,
+        track_number: int | None = None,
+        disc_number: int | None = None,
         padding: int = 2,
     ) -> str:
         """Sanitize track filename to be filesystem-safe."""
@@ -790,7 +792,7 @@ class TrackDownloader(BaseDownloader):
 
     async def _get_track_list(
         self, soup: BeautifulSoup, album_url: str
-    ) -> List[TrackInfo]:
+    ) -> list[TrackInfo]:
         """Extract track list from album page."""
         tracks = []
         tracklist_table = soup.find("table", id="songlist")
@@ -901,13 +903,16 @@ class TrackDownloader(BaseDownloader):
                             track_link = cell.find("a", href=True)
                             if track_link:
                                 cell_text = cell.get_text().strip()
-                                is_duration = (
-                                    ":" in cell_text
-                                    and any(c.isdigit() for c in cell_text)
-                                ) or "MB" in cell_text
-                                if not is_duration:
-                                    track_name_cell = cell
-                                    break
+                                if (
+                                    is_duration := (
+                                        ":" in cell_text
+                                        and any(c.isdigit() for c in cell_text)
+                                    )
+                                    or "MB" in cell_text
+                                ):
+                                    continue
+                                track_name_cell = cell
+                                break
                     else:
                         track_name_cell = cells[1] if len(cells) > 1 else None
 
@@ -958,7 +963,7 @@ class TrackDownloader(BaseDownloader):
                 download_links.append((href, text))
 
         self.logger.debug(
-            f"{track_context}: Found {len(download_links)} download links"
+            f"{track_context}: Found {len(download_links)} download link(s)"
         )
 
         for fmt in self.config.preferred_formats:
@@ -987,7 +992,7 @@ class TrackDownloader(BaseDownloader):
         track: TrackInfo,
         album_dir: Path,
         album_url: str,
-        padding_dict: Dict[Optional[int], int],
+        padding_dict: dict[int | None, int],
     ) -> bool:
         """Download a single track."""
         async with self.semaphore:
@@ -1017,12 +1022,11 @@ class TrackDownloader(BaseDownloader):
     async def download_tracks(
         self,
         session: aiohttp.ClientSession,
-        soup: BeautifulSoup,
+        tracks: list[TrackInfo],
         album_dir: Path,
         album_url: str,
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """Download all tracks for an album."""
-        tracks = await self._get_track_list(soup, album_url)
         if not tracks:
             self.logger.error("No tracks found in album")  # Ooops!
             return 0, 0
@@ -1055,7 +1059,7 @@ class TrackDownloader(BaseDownloader):
         return successful, failed
 
     def _display_tracklist(
-        self, tracks: List[TrackInfo], padding_dict: Dict[Optional[int], int]
+        self, tracks: list[TrackInfo], padding_dict: dict[int | None, int]
     ) -> None:
         """Display the tracklist efficiently in a single call."""
         track_entries = []
@@ -1081,7 +1085,7 @@ class TrackDownloader(BaseDownloader):
 class KhinsiderDownloader:
     """Main downloader class for Khinsider albums."""
 
-    def __init__(self, config: Config, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(self, config: Config, logger: logging.Logger | None = None) -> None:
         """Initialize the downloader."""
         self.config = config
         self.logger = logger or logging.getLogger("khinsider_downloader")
@@ -1174,7 +1178,7 @@ class KhinsiderDownloader:
 
             # Download tracks
             track_success, track_failed = await self.track_downloader.download_tracks(
-                session, soup, album_dir, album_url
+                session, tracks, album_dir, album_url
             )
 
             total_success = artwork_success + track_success
@@ -1192,8 +1196,8 @@ class KhinsiderDownloader:
         self,
         album_name: str,
         album_dir: Path,
-        tracks: List[TrackInfo],
-        padding_dict: Dict[Optional[int], int],
+        tracks: list[TrackInfo],
+        padding_dict: dict[int | None, int],
         artwork_count: int,
     ) -> None:
         """Display album information and configuration."""
@@ -1292,6 +1296,9 @@ class KhinsiderDownloader:
 
 async def main() -> None:
     """Main entry point."""
+    default_preferred_formats = Config.__dataclass_fields__["preferred_formats"].default
+    default_html_parser = Config.__dataclass_fields__["html_parser"].default_factory()
+
     parser = argparse.ArgumentParser(
         description="Khinsider Music Downloader",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1310,56 +1317,56 @@ Examples:
         "-o",
         "--output",
         type=Path,
-        default=Config.output_path,
-        help=f"Base output directory (default: {Config.output_path})",
+        default=Config.__dataclass_fields__["output_path"].default,
+        help=f"Base output directory (default: {Config.__dataclass_fields__['output_path'].default})",
     )
 
     parser.add_argument(
         "-c",
         "--concurrency",
         type=int,
-        default=Config.max_concurrency,
-        help=f"Maximum concurrent downloads (default: {Config.max_concurrency})",
+        default=Config.__dataclass_fields__["max_concurrency"].default,
+        help=f"Maximum concurrent downloads (default: {Config.__dataclass_fields__['max_concurrency'].default})",
     )
 
     parser.add_argument(
         "-r",
         "--rate-limit",
         type=float,
-        default=Config.rate_limit,
-        help=f"Global rate limit in requests per second (default: {Config.rate_limit})",
+        default=Config.__dataclass_fields__["rate_limit"].default,
+        help=f"Global rate limit in requests per second (default: {Config.__dataclass_fields__['rate_limit'].default})",
     )
 
     parser.add_argument(
         "-j",
         "--jitter",
         type=float,
-        default=Config.jitter_percent,
-        help=f"Jitter as percentage of base delay (default: {Config.jitter_percent}%%)",
+        default=Config.__dataclass_fields__["jitter_percent"].default,
+        help=f"Jitter as percentage of base delay (default: {Config.__dataclass_fields__['jitter_percent'].default}%%)",
     )
 
     parser.add_argument(
         "-f",
         "--formats",
         type=lambda s: [f.strip().lower() for f in s.split(",")],
-        default=Config.preferred_formats,
-        help=f"Preferred formats in order (default: {','.join(Config.preferred_formats)})",
+        default=default_preferred_formats,
+        help=f"Preferred formats in order (default: {','.join(default_preferred_formats)})",
     )
 
     parser.add_argument(
         "-s",
         "--chunk-size",
         type=int,
-        default=Config.chunk_size,
-        help=f"Chunk size in bytes, 0 for single write (default: {Config.chunk_size})",
+        default=Config.__dataclass_fields__["chunk_size"].default,
+        help=f"Chunk size in bytes, 0 for single write (default: {Config.__dataclass_fields__['chunk_size'].default})",
     )
 
     parser.add_argument(
         "-m",
         "--max-retries",
         type=int,
-        default=Config.max_retries,
-        help=f"Maximum retry attempts (default: {Config.max_retries})",
+        default=Config.__dataclass_fields__["max_retries"].default,
+        help=f"Maximum retry attempts (default: {Config.__dataclass_fields__['max_retries'].default})",
     )
 
     parser.add_argument(
@@ -1367,7 +1374,7 @@ Examples:
         "--track-padding",
         type=int,
         choices=[1, 2, 3, 4],
-        help="Track number padding (1=1,2,3; 2=01,02,03; 3=001,002,003; 4=0001,0002,0003). Default: auto-detect",
+        help="Track number padding (1=1,2,3; 2=01,02,03; 3=001,002,003; 4=0001,0002,0003). Default: None (auto-detect)",
     )
 
     parser.add_argument(
@@ -1375,8 +1382,8 @@ Examples:
         "--padding-mode",
         type=str,
         choices=["disc", "total"],
-        default=Config.padding_mode,
-        help="Padding mode for multi-disc albums: 'disc' (per-disc padding) or 'total' (total track count padding) (default: disc)",
+        default=Config.__dataclass_fields__["padding_mode"].default,
+        help=f"Padding mode for multi-disc albums: 'disc' (per-disc padding) or 'total' (total track count padding) (default: {Config.__dataclass_fields__['padding_mode'].default})",
     )
 
     parser.add_argument(
@@ -1384,7 +1391,7 @@ Examples:
         "--html-parser",
         type=str,
         choices=["html.parser", "lxml", "html5lib"],
-        help="HTML parser to use (default: lxml, fallback: html.parser)",
+        help=f"HTML parser to use (default: {default_html_parser})",
     )
 
     parser.add_argument(
@@ -1407,11 +1414,7 @@ Examples:
             max_retries=args.max_retries,
             track_padding=args.track_padding,
             padding_mode=args.padding_mode,
-            html_parser=(
-                args.html_parser
-                if args.html_parser
-                else ("lxml" if LXML_AVAILABLE else "html.parser")
-            ),
+            html_parser=args.html_parser if args.html_parser else default_html_parser,
             debug=args.debug,
         )
     except ValueError as e:
