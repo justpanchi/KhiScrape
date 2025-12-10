@@ -60,7 +60,7 @@ python3 khiscrape.py \
 | `-f, --formats LIST` | Preferred formats in order | `flac,wav,m4a,opus,ogg,aac,mp3` |
 | `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `524288` (512KiB) |
 | `-m, --max-retries NUM` | Retry attempts | `3` |
-| `-t, --track-padding NUM` | Track number padding (1-4 digits) | Auto-detect |
+| `-t, --track-padding NUM` | Track number padding (1-4 digits) | None (auto-detect) |
 | `-p, --padding-mode MODE` | Multi-disc padding: `disc` or `total` | `disc` |
 | `-b, --html-parser PARSER` | HTML parser to use (`lxml`, `html.parser`, `html5lib`) | `lxml` (fallback: `html.parser`) |
 | `-d, --debug` | Enable debug output | `False` |
@@ -68,7 +68,7 @@ python3 khiscrape.py \
 ## 🛠️ Technical Details
 
 ### Requirements
-- **Python**: >= 3.7
+- **Python**: >= 3.10
 - **Dependencies**:
   - `aiohttp` - Asynchronous HTTP client
   - `aiofiles` - Async file operations
