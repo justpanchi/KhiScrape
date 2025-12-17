@@ -19,11 +19,11 @@ Asynchronous Python script to download complete game soundtracks from [Khinsider
 - **Filesystem Safety** - Automatic filename sanitization for cross-platform compatibility
 
 ### 🎛️ Configuration
+- **Chunked Downloads** - Configurable chunk sizes for large files
 - **Format Preferences** - Customize preferred audio formats (FLAC, MP3, etc.)
+- **HTML Parser** - Configurable parser for BeautifulSoup
 - **Track Number Padding** - Auto-detection or manual control over track numbering
 - **Multi-Disc Padding Modes** - Padding per-disc or total track count
-- **Chunked Downloads** - Configurable chunk sizes for large files
-- **HTML Parser** - Configurable parser for BeautifulSoup
 
 ## 🚀 Quick Start
 
@@ -54,15 +54,16 @@ python3 khiscrape.py \
 |--------|-------------|---------|
 | `urls` | Album URLs to download (required) | - |
 | `-o, --output PATH` | Output directory | `KhiScrape` |
+| `-a, --artworks-dir PATH` | Subdirectory for artworks | `Artworks` |
 | `-c, --concurrency NUM` | Concurrent downloads | `4` |
 | `-r, --rate-limit RPS` | Requests per second | `2.0` |
 | `-j, --jitter JITTER` | Jitter as percentage of base delay | `70%` |
-| `-f, --formats LIST` | Preferred formats in order | `flac,wav,m4a,opus,ogg,aac,mp3` |
 | `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `524288` (512KiB) |
 | `-m, --max-retries NUM` | Retry attempts | `3` |
+| `-f, --formats LIST` | Preferred formats in order | `flac,wav,m4a,opus,ogg,aac,mp3` |
+| `-b, --html-parser PARSER` | HTML parser to use (`lxml`, `html.parser`, `html5lib`) | `lxml` (fallback: `html.parser`) |
 | `-t, --track-padding NUM` | Track number padding (1-4 digits) | None (auto-detect) |
 | `-p, --padding-mode MODE` | Multi-disc padding: `disc` or `total` | `disc` |
-| `-b, --html-parser PARSER` | HTML parser to use (`lxml`, `html.parser`, `html5lib`) | `lxml` (fallback: `html.parser`) |
 | `-d, --debug` | Enable debug output | `False` |
 
 ## 🛠️ Technical Details
@@ -74,6 +75,7 @@ python3 khiscrape.py \
   - `aiofiles` - Async file operations
   - `beautifulsoup4` - HTML parsing
   - `colorama` - Cross-platform colored terminal output
+  - `yarl` - URL handling (dependency of `aiohttp`)
 
 ---
 
