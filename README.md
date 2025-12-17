@@ -29,7 +29,7 @@ Asynchronous Python script to download complete game soundtracks from [Khinsider
 
 ### Installation
 ```sh
-pip install aiohttp aiofiles beautifulsoup4 colorama
+pip install git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel
 ```
 
 ### Basic Usage
