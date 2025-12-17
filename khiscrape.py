@@ -10,13 +10,13 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, unquote
 
 import aiofiles
 import aiohttp
 from aiohttp import ClientTimeout, TCPConnector
 from bs4 import BeautifulSoup
 from colorama import Fore, Style, init
+import yarl  # replaces urllib; aiohttp depends on yarl, so it’s already available
 
 
 init(autoreset=True)
@@ -30,33 +30,36 @@ except ImportError:
     LXML_AVAILABLE = False
 
 
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Config:
     """Immutable configuration container."""
 
     output_path: Path = Path("KhiScrape")
+    artworks_directory: str = "Artworks"  # Empty string = no subdirectory
     max_filename_bytes: int = 255
-    preferred_formats: tuple[str, ...] = field(
-        default=(
-            "flac",
-            "wav",
-            "m4a",
-            "opus",
-            "ogg",
-            "aac",
-            "mp3",
-        )
-    )
+    invalid_chars_pattern: str = r'[\\/*?:"<>|]'
+    invalid_chars_replacement: str = "_"
     max_concurrency: int = 4
+    rate_limit: float = 2.0  # requests per second
+    jitter_percent: float = 70.0  # Jitter as percentage of base delay
     chunk_size: int | None = 512 * 1024  # 512 KiB
+    max_retries: int = 3
     connection_timeout: float = 15.0
     total_timeout: float = 180.0
     read_timeout: float = 60.0
-    max_retries: int = 3
-    rate_limit: float = 2.0  # requests per second
-    jitter_percent: float = 70.0  # Jitter as percentage of base delay
-    invalid_chars_pattern: str = r'[\\/*?:"<>|]'
-    invalid_chars_replacement: str = "_"
+    preferred_formats: tuple[str, ...] = field(
+        default=("flac", "wav", "m4a", "opus", "ogg", "aac", "mp3")
+    )
+    html_parser: str = field(
+        default_factory=lambda: "lxml" if LXML_AVAILABLE else "html.parser"
+    )
+    track_padding: int | None = None  # None = auto-detect
+    padding_mode: str = "disc"  # "disc" or "total"
     user_agent: str = field(
         default=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -65,11 +68,6 @@ class Config:
     )
     base_referer: str = "https://downloads.khinsider.com/"
     debug: bool = False
-    track_padding: int | None = None  # None = auto-detect
-    padding_mode: str = "disc"  # "disc" or "total"
-    html_parser: str = field(
-        default_factory=lambda: "lxml" if LXML_AVAILABLE else "html.parser"
-    )
 
     def __post_init__(self) -> None:
         """Validate configuration values after initialization."""
@@ -82,59 +80,14 @@ class Config:
                 f"output_path must be a Path object, got {type(self.output_path)}"
             )
 
+        if not isinstance(self.artworks_directory, str):
+            raise ValueError(
+                f"artworks_directory must be a string, got {type(self.artworks_directory)}"
+            )
+
         if not isinstance(self.max_filename_bytes, int) or self.max_filename_bytes < 1:
             raise ValueError(
                 f"max_filename_bytes must be a positive integer, got {self.max_filename_bytes}"
-            )
-
-        if not isinstance(self.preferred_formats, tuple):
-            raise ValueError(
-                f"preferred_formats must be a tuple, got {type(self.preferred_formats)}"
-            )
-        if not self.preferred_formats:
-            raise ValueError("preferred_formats must not be empty")
-        for fmt in self.preferred_formats:
-            if not isinstance(fmt, str) or not fmt:
-                raise ValueError(
-                    f"All preferred_formats must be non-empty strings, got {self.preferred_formats}"
-                )
-
-        if not isinstance(self.max_concurrency, int) or self.max_concurrency < 1:
-            raise ValueError(
-                f"max_concurrency must be at least 1, got {self.max_concurrency}"
-            )
-
-        if self.chunk_size is not None:
-            if not isinstance(self.chunk_size, int) or self.chunk_size <= 0:
-                raise ValueError(
-                    f"chunk_size must be positive integer or None, got {self.chunk_size}"
-                )  # 0 → None in main()
-
-        for timeout_name, timeout_value in [
-            ("connection_timeout", self.connection_timeout),
-            ("total_timeout", self.total_timeout),
-            ("read_timeout", self.read_timeout),
-        ]:
-            if not isinstance(timeout_value, (int, float)) or timeout_value <= 0:
-                raise ValueError(
-                    f"{timeout_name} must be positive number, got {timeout_value}"
-                )
-
-        if not isinstance(self.max_retries, int) or self.max_retries < 0:
-            raise ValueError(
-                f"max_retries must be non-negative integer, got {self.max_retries}"
-            )
-
-        if not isinstance(self.rate_limit, (int, float)) or self.rate_limit <= 0:
-            raise ValueError(
-                f"rate_limit must be positive number, got {self.rate_limit}"
-            )
-
-        if not isinstance(self.jitter_percent, (int, float)) or not (
-            0 <= self.jitter_percent <= 100
-        ):
-            raise ValueError(
-                f"jitter_percent must be between 0 and 100, got {self.jitter_percent}"
             )
 
         if (
@@ -150,14 +103,70 @@ class Config:
                 f"invalid_chars_replacement must be string, got {type(self.invalid_chars_replacement)}"
             )
 
-        if not isinstance(self.user_agent, str) or not self.user_agent:
+        if not isinstance(self.max_concurrency, int) or self.max_concurrency < 1:
             raise ValueError(
-                f"user_agent must be non-empty string, got {self.user_agent}"
+                f"max_concurrency must be at least 1, got {self.max_concurrency}"
             )
 
-        if not isinstance(self.base_referer, str) or not self.base_referer:
+        if not isinstance(self.rate_limit, (int, float)) or self.rate_limit <= 0:
             raise ValueError(
-                f"base_referer must be non-empty string, got {self.base_referer}"
+                f"rate_limit must be positive number, got {self.rate_limit}"
+            )
+
+        if not isinstance(self.jitter_percent, (int, float)) or not (
+            0 <= self.jitter_percent <= 100
+        ):
+            raise ValueError(
+                f"jitter_percent must be between 0 and 100, got {self.jitter_percent}"
+            )
+
+        if self.chunk_size is not None:
+            if not isinstance(self.chunk_size, int) or self.chunk_size <= 0:
+                raise ValueError(
+                    f"chunk_size must be positive integer or None, got {self.chunk_size}"
+                )  # 0 → None in main()
+
+        if not isinstance(self.max_retries, int) or self.max_retries < 0:
+            raise ValueError(
+                f"max_retries must be non-negative integer, got {self.max_retries}"
+            )
+
+        for timeout_name, timeout_value in [
+            ("connection_timeout", self.connection_timeout),
+            ("total_timeout", self.total_timeout),
+            ("read_timeout", self.read_timeout),
+        ]:
+            if not isinstance(timeout_value, (int, float)) or timeout_value <= 0:
+                raise ValueError(
+                    f"{timeout_name} must be positive number, got {timeout_value}"
+                )
+
+        if not isinstance(self.preferred_formats, tuple):
+            raise ValueError(
+                f"preferred_formats must be a tuple, got {type(self.preferred_formats)}"
+            )
+        if not self.preferred_formats:
+            raise ValueError("preferred_formats must not be empty")
+        for fmt in self.preferred_formats:
+            if not isinstance(fmt, str) or not fmt:
+                raise ValueError(
+                    f"All preferred_formats must be non-empty strings, got {self.preferred_formats}"
+                )
+
+        if not isinstance(self.html_parser, str):
+            raise ValueError(
+                f"html_parser must be string, got {type(self.html_parser)}"
+            )
+
+        valid_parsers = ["html.parser", "lxml", "html5lib"]
+        if self.html_parser not in valid_parsers:
+            raise ValueError(
+                f"html_parser must be one of {valid_parsers}, got {self.html_parser}"
+            )
+
+        if self.html_parser == "lxml" and not LXML_AVAILABLE:
+            raise ValueError(
+                "lxml parser requested but lxml is not installed. Falling back to html.parser."
             )
 
         if self.track_padding is not None:
@@ -176,24 +185,62 @@ class Config:
                 f"padding_mode must be 'disc' or 'total', got {self.padding_mode}"
             )
 
+        if not isinstance(self.user_agent, str) or not self.user_agent:
+            raise ValueError(
+                f"user_agent must be non-empty string, got {self.user_agent}"
+            )
+
+        if not isinstance(self.base_referer, str) or not self.base_referer:
+            raise ValueError(
+                f"base_referer must be non-empty string, got {self.base_referer}"
+            )
+
         if not isinstance(self.debug, bool):
             raise ValueError(f"debug must be boolean, got {type(self.debug)}")
 
-        if not isinstance(self.html_parser, str):
-            raise ValueError(
-                f"html_parser must be string, got {type(self.html_parser)}"
-            )
 
-        valid_parsers = ["html.parser", "lxml", "html5lib"]
-        if self.html_parser not in valid_parsers:
-            raise ValueError(
-                f"html_parser must be one of {valid_parsers}, got {self.html_parser}"
-            )
+class PathSanitizer:
+    """Handles sanitization of paths and filenames for filesystem safety."""
 
-        if self.html_parser == "lxml" and not LXML_AVAILABLE:
-            raise ValueError(
-                "lxml parser requested but lxml is not installed. Falling back to html.parser."
-            )
+    @staticmethod
+    def sanitize_filename(name: str, config: Config, is_temp: bool = False) -> str:
+        """Sanitize filename."""
+        sanitized = re.sub(
+            config.invalid_chars_pattern,
+            config.invalid_chars_replacement,
+            name,
+        )
+
+        max_bytes = config.max_filename_bytes
+        if is_temp:
+            max_bytes -= 1  # Reserve one byte for the dot prefix
+
+        encoded_sanitized = sanitized.encode("utf-8")
+        if len(encoded_sanitized) > max_bytes:
+            truncated = encoded_sanitized[:max_bytes]
+            # Avoid breaking UTF-8 sequences
+            while truncated and truncated[-1] & 0x80 and not (truncated[-1] & 0x40):
+                truncated = truncated[:-1]
+            sanitized = truncated.decode("utf-8", errors="ignore")
+
+        return sanitized
+
+    @staticmethod
+    def sanitize_url_filename(url: str, config: Config) -> str:
+        """Sanitize filename from URL."""
+        url_obj = yarl.URL(url)
+        filename = url_obj.parts[-1] if url_obj.parts else "unknown"
+        return PathSanitizer.sanitize_filename(filename, config)
+
+    @staticmethod
+    def sanitize_album_name(name: str, config: Config) -> str:
+        """Sanitize album name for use as directory name."""
+        return PathSanitizer.sanitize_filename(name, config)
+
+
+# -----------------------------------------------------------------------------
+# Data Structures
+# -----------------------------------------------------------------------------
 
 
 @dataclass(kw_only=True, slots=True)
@@ -216,6 +263,11 @@ class ArtworkInfo:
     url: str
     filename: str
     file_size: int = 0
+
+
+# -----------------------------------------------------------------------------
+# Logging and Output
+# -----------------------------------------------------------------------------
 
 
 class ColorFormatter(logging.Formatter):
@@ -289,6 +341,11 @@ def setup_logging(
         logger.addHandler(console_handler)
 
     return logger
+
+
+# -----------------------------------------------------------------------------
+# Core Components
+# -----------------------------------------------------------------------------
 
 
 class RateLimiter:
@@ -441,35 +498,6 @@ class BaseDownloader:
         )
         return False
 
-    def _sanitize_filename(
-        self,
-        name: str,
-        is_temp: bool = False,
-    ) -> str:
-        """Sanitize filename to be filesystem-safe."""
-        # URL decode the filename first
-        decoded_name = unquote(name)
-
-        sanitized = re.sub(
-            self.config.invalid_chars_pattern,
-            self.config.invalid_chars_replacement,
-            decoded_name,
-        )
-
-        max_bytes = self.config.max_filename_bytes
-        if is_temp:
-            max_bytes -= 1  # Reserve one byte for the dot prefix
-
-        encoded_sanitized = sanitized.encode("utf-8")
-        if len(encoded_sanitized) > max_bytes:
-            truncated = encoded_sanitized[:max_bytes]
-            # Avoid breaking UTF-8 sequences
-            while truncated and truncated[-1] & 0x80 and not (truncated[-1] & 0x40):
-                truncated = truncated[:-1]
-            sanitized = truncated.decode("utf-8", errors="ignore")
-
-        return sanitized
-
     async def _download_file(
         self,
         session: aiohttp.ClientSession,
@@ -597,6 +625,11 @@ class BaseDownloader:
         return False
 
 
+# -----------------------------------------------------------------------------
+# Specialized Downloaders
+# -----------------------------------------------------------------------------
+
+
 class ArtworkDownloader(BaseDownloader):
     """Handles artwork downloading functionality."""
 
@@ -613,16 +646,15 @@ class ArtworkDownloader(BaseDownloader):
             for img_div in album_images:
                 img_link = img_div.find("a", href=True)
                 if img_link:
-                    img_url = urljoin(album_url, img_link["href"])
+                    base_url = yarl.URL(album_url)
+                    img_url = str(base_url.join(yarl.URL(img_link["href"])))
 
                     # Skip thumbnail URLs
                     if "/thumbs/" in img_url:
                         self.logger.debug(f"Skipping thumbnail: {img_url}")
                         continue
 
-                    filename = self._sanitize_filename(
-                        Path(unquote(urlparse(img_url).path)).name
-                    )
+                    filename = PathSanitizer.sanitize_url_filename(img_url, self.config)
 
                     artwork = ArtworkInfo(url=img_url, filename=filename)
                     artworks.append(artwork)
@@ -639,12 +671,12 @@ class ArtworkDownloader(BaseDownloader):
         self,
         session: aiohttp.ClientSession,
         artwork: ArtworkInfo,
-        album_dir: Path,
+        artwork_dir: Path,
         album_url: str,
     ) -> bool:
         """Download a single artwork."""
         async with self.semaphore:
-            file_path = album_dir / artwork.filename
+            file_path = artwork_dir / artwork.filename
             return await self._download_file(
                 session, artwork.url, file_path, album_url, context="Artwork"
             )
@@ -660,11 +692,16 @@ class ArtworkDownloader(BaseDownloader):
         if not artworks:
             return 0, 0
 
+        artwork_dir = album_dir
+        if self.config.artworks_directory:
+            artwork_dir = album_dir / self.config.artworks_directory
+            artwork_dir.mkdir(parents=True, exist_ok=True)
+
         self.logger.info(f"Downloading {len(artworks)} artwork(s)...")
 
         download_tasks = []
         for artwork in artworks:
-            task = self._download_artwork(session, artwork, album_dir, album_url)
+            task = self._download_artwork(session, artwork, artwork_dir, album_url)
             download_tasks.append(task)
 
         results = await asyncio.gather(*download_tasks, return_exceptions=True)
@@ -777,7 +814,7 @@ class TrackDownloader(BaseDownloader):
         padding: int = 2,
     ) -> str:
         """Sanitize track filename to be filesystem-safe."""
-        sanitized_name = self._sanitize_filename(name, is_temp)
+        sanitized_name = PathSanitizer.sanitize_filename(name, self.config, is_temp)
 
         if track_number is not None:
             formatted_track = self._format_track_number(track_number, padding)
@@ -789,6 +826,29 @@ class TrackDownloader(BaseDownloader):
             prefix = ""
 
         return prefix + sanitized_name
+
+    def _display_tracklist(
+        self, tracks: list[TrackInfo], padding_dict: dict[int | None, int]
+    ) -> None:
+        """Display the tracklist efficiently in a single call."""
+        track_entries = []
+        for track in tracks:
+            track_padding = padding_dict.get(
+                track.disc_number, 3
+            )  # Default to 3 if not found
+            formatted_track = self._format_track_number(track.number, track_padding)
+            if track.disc_number is not None:
+                track_entries.append(
+                    f"{track.disc_number}-{formatted_track}. {track.name}"
+                )
+            else:
+                track_entries.append(f"{formatted_track}. {track.name}")
+
+        tracklist_text = "\n".join(track_entries)
+        self.logger.info(
+            f"Tracklist ({len(tracks)} tracks):", extra={"tracklist": True}
+        )
+        self.logger.info(tracklist_text, extra={"tracklist_content": True})
 
     async def _get_track_list(
         self, soup: BeautifulSoup, album_url: str
@@ -920,7 +980,8 @@ class TrackDownloader(BaseDownloader):
                     track_link = track_name_cell.find("a", href=True)
                     if track_link:
                         track_name = track_link.get_text().strip()
-                        track_url = urljoin(album_url, track_link["href"])
+                        base_url = yarl.URL(album_url)
+                        track_url = str(base_url.join(yarl.URL(track_link["href"])))
 
                 if track_name and track_url:
                     track = TrackInfo(
@@ -969,7 +1030,8 @@ class TrackDownloader(BaseDownloader):
         for fmt in self.config.preferred_formats:
             for href, text in download_links:
                 if f"download as {fmt}" in text:
-                    download_url = urljoin(track.page_url, href)
+                    base_url = yarl.URL(track.page_url)
+                    download_url = str(base_url.join(yarl.URL(href)))
                     self.logger.debug(
                         f"{track_context}: Trying format {fmt}: {download_url}"
                     )
@@ -1058,28 +1120,10 @@ class TrackDownloader(BaseDownloader):
 
         return successful, failed
 
-    def _display_tracklist(
-        self, tracks: list[TrackInfo], padding_dict: dict[int | None, int]
-    ) -> None:
-        """Display the tracklist efficiently in a single call."""
-        track_entries = []
-        for track in tracks:
-            track_padding = padding_dict.get(
-                track.disc_number, 3
-            )  # Default to 3 if not found
-            formatted_track = self._format_track_number(track.number, track_padding)
-            if track.disc_number is not None:
-                track_entries.append(
-                    f"{track.disc_number}-{formatted_track}. {track.name}"
-                )
-            else:
-                track_entries.append(f"{formatted_track}. {track.name}")
 
-        tracklist_text = "\n".join(track_entries)
-        self.logger.info(
-            f"Tracklist ({len(tracks)} tracks):", extra={"tracklist": True}
-        )
-        self.logger.info(tracklist_text, extra={"tracklist_content": True})
+# -----------------------------------------------------------------------------
+# Main Downloader
+# -----------------------------------------------------------------------------
 
 
 class KhinsiderDownloader:
@@ -1129,68 +1173,15 @@ class KhinsiderDownloader:
                         self.logger.debug(
                             f"Extracted album name via {strategy.__name__}: {clean_text}"
                         )
-                        return self.artwork_downloader._sanitize_filename(clean_text)
+                        return PathSanitizer.sanitize_album_name(
+                            clean_text, self.config
+                        )
 
         # Fallback: use URL path
-        fallback = urlparse(album_url).path.split("/")[-1] or "unknown_album"
+        url_obj = yarl.URL(album_url)
+        fallback = url_obj.parts[-1] if url_obj.parts else "unknown_album"
         self.logger.warning(f"Using URL fallback for album name: {fallback}")
-        return self.artwork_downloader._sanitize_filename(fallback)
-
-    async def download_album(self, album_url: str) -> bool:
-        """Download all artworks and tracks from an album."""
-        self.logger.info(f"Processing album: {album_url}")
-
-        connector = TCPConnector(limit=self.config.max_concurrency * 2)
-        async with aiohttp.ClientSession(
-            connector=connector, headers=self.artwork_downloader.headers
-        ) as session:
-            response = await self.artwork_downloader._make_request(
-                session, album_url, self.config.base_referer
-            )
-            if not response:
-                return False
-
-            html = await response.text()
-            soup = self._make_soup(html)
-
-            album_name = await self._get_album_name(soup, album_url)
-            album_dir = self.config.output_path / album_name
-            album_dir.mkdir(parents=True, exist_ok=True)
-
-            tracks = await self.track_downloader._get_track_list(soup, album_url)
-            if not tracks:
-                self.logger.error("No tracks found in album")  # Ooops!
-                return False
-
-            artworks = await self.artwork_downloader._get_artwork_list(soup, album_url)
-            padding_dict = self.track_downloader._calculate_track_padding(tracks)
-
-            self._display_album_info(
-                album_name, album_dir, tracks, padding_dict, len(artworks)
-            )
-
-            # Download artworks
-            artwork_success, artwork_failed = (
-                await self.artwork_downloader.download_artworks(
-                    session, artworks, album_dir, album_url
-                )
-            )
-
-            # Download tracks
-            track_success, track_failed = await self.track_downloader.download_tracks(
-                session, tracks, album_dir, album_url
-            )
-
-            total_success = artwork_success + track_success
-            total_failed = artwork_failed + track_failed
-
-            self.logger.info(
-                f"Album completed: {track_success}/{len(tracks)} tracks, {artwork_success}/{len(artworks)} artworks downloaded successfully"
-            )
-            if total_failed > 0:
-                self.logger.warning(f"{total_failed} items failed to download")
-
-            return track_failed == 0  # Consider album success if all tracks downloaded
+        return PathSanitizer.sanitize_album_name(fallback, self.config)
 
     def _display_album_info(
         self,
@@ -1218,6 +1209,17 @@ class KhinsiderDownloader:
         lines.append(("Output", str(album_dir), "key_value"))
         lines.append(("Tracks", str(len(tracks)), "key_value"))
         lines.append(("Artworks", str(artwork_count), "key_value"))
+        lines.append(
+            (
+                "Artworks Directory",
+                (
+                    self.config.artworks_directory
+                    if self.config.artworks_directory
+                    else "None (directly in album)"
+                ),
+                "key_value",
+            )
+        )
         lines.append(
             (
                 "Discs",
@@ -1293,6 +1295,67 @@ class KhinsiderDownloader:
                     "", extra={"key_value": True, "key": key, "value": value}
                 )
 
+    async def download_album(self, album_url: str) -> bool:
+        """Download all artworks and tracks from an album."""
+        self.logger.info(f"Processing album: {album_url}")
+
+        connector = TCPConnector(limit=self.config.max_concurrency * 2)
+        async with aiohttp.ClientSession(
+            connector=connector, headers=self.artwork_downloader.headers
+        ) as session:
+            response = await self.artwork_downloader._make_request(
+                session, album_url, self.config.base_referer
+            )
+            if not response:
+                return False
+
+            html = await response.text()
+            soup = self._make_soup(html)
+
+            album_name = await self._get_album_name(soup, album_url)
+            album_dir = self.config.output_path / album_name
+            album_dir.mkdir(parents=True, exist_ok=True)
+
+            tracks = await self.track_downloader._get_track_list(soup, album_url)
+            if not tracks:
+                self.logger.error("No tracks found in album")  # Ooops!
+                return False
+
+            artworks = await self.artwork_downloader._get_artwork_list(soup, album_url)
+            padding_dict = self.track_downloader._calculate_track_padding(tracks)
+
+            self._display_album_info(
+                album_name, album_dir, tracks, padding_dict, len(artworks)
+            )
+
+            # Download artworks
+            artwork_success, artwork_failed = (
+                await self.artwork_downloader.download_artworks(
+                    session, artworks, album_dir, album_url
+                )
+            )
+
+            # Download tracks
+            track_success, track_failed = await self.track_downloader.download_tracks(
+                session, tracks, album_dir, album_url
+            )
+
+            total_success = artwork_success + track_success
+            total_failed = artwork_failed + track_failed
+
+            self.logger.info(
+                f"Album completed: {track_success}/{len(tracks)} tracks, {artwork_success}/{len(artworks)} artworks downloaded successfully"
+            )
+            if total_failed > 0:
+                self.logger.warning(f"{total_failed} items failed to download")
+
+            return track_failed == 0  # Consider album success if all tracks downloaded
+
+
+# -----------------------------------------------------------------------------
+# Command Line Interface
+# -----------------------------------------------------------------------------
+
 
 async def main() -> None:
     """Main entry point."""
@@ -1322,6 +1385,14 @@ Examples:
     )
 
     parser.add_argument(
+        "-a",
+        "--artworks-dir",
+        type=str,
+        default=Config.__dataclass_fields__["artworks_directory"].default,
+        help=f"Subdirectory for artworks, empty for album directory (default: {Config.__dataclass_fields__['artworks_directory'].default})",
+    )
+
+    parser.add_argument(
         "-c",
         "--concurrency",
         type=int,
@@ -1346,14 +1417,6 @@ Examples:
     )
 
     parser.add_argument(
-        "-f",
-        "--formats",
-        type=lambda s: [f.strip().lower() for f in s.split(",")],
-        default=default_preferred_formats,
-        help=f"Preferred formats in order (default: {','.join(default_preferred_formats)})",
-    )
-
-    parser.add_argument(
         "-s",
         "--chunk-size",
         type=int,
@@ -1367,6 +1430,22 @@ Examples:
         type=int,
         default=Config.__dataclass_fields__["max_retries"].default,
         help=f"Maximum retry attempts (default: {Config.__dataclass_fields__['max_retries'].default})",
+    )
+
+    parser.add_argument(
+        "-f",
+        "--formats",
+        type=lambda s: [f.strip().lower() for f in s.split(",")],
+        default=default_preferred_formats,
+        help=f"Preferred formats in order (default: {','.join(default_preferred_formats)})",
+    )
+
+    parser.add_argument(
+        "-b",
+        "--html-parser",
+        type=str,
+        choices=["html.parser", "lxml", "html5lib"],
+        help=f"HTML parser to use (default: {default_html_parser})",
     )
 
     parser.add_argument(
@@ -1387,14 +1466,6 @@ Examples:
     )
 
     parser.add_argument(
-        "-b",
-        "--html-parser",
-        type=str,
-        choices=["html.parser", "lxml", "html5lib"],
-        help=f"HTML parser to use (default: {default_html_parser})",
-    )
-
-    parser.add_argument(
         "-d", "--debug", action="store_true", help="Enable debug output"
     )
 
@@ -1406,15 +1477,16 @@ Examples:
     try:
         config = Config(
             output_path=args.output,
+            artworks_directory=args.artworks_dir,
             max_concurrency=args.concurrency,
             rate_limit=args.rate_limit,
             jitter_percent=args.jitter,
-            preferred_formats=tuple(args.formats),
             chunk_size=args.chunk_size if args.chunk_size != 0 else None,
             max_retries=args.max_retries,
+            preferred_formats=tuple(args.formats),
+            html_parser=args.html_parser if args.html_parser else default_html_parser,
             track_padding=args.track_padding,
             padding_mode=args.padding_mode,
-            html_parser=args.html_parser if args.html_parser else default_html_parser,
             debug=args.debug,
         )
     except ValueError as e:
