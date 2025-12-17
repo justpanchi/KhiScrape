@@ -29,7 +29,11 @@ Asynchronous Python script to download complete game soundtracks from [Khinsider
 
 ### Installation
 ```sh
-pip install git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel
+pip install "khiscrape @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
+```
+
+```sh
+pip install "khiscrape[lxml] @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
 
 ### Basic Usage
