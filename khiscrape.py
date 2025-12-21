@@ -16,7 +16,7 @@ import aiohttp
 from aiohttp import ClientTimeout, TCPConnector
 from bs4 import BeautifulSoup
 from colorama import Fore, Style, init
-import yarl  # replaces urllib; aiohttp depends on yarl, so it’s already available
+import yarl
 
 
 init(autoreset=True)
@@ -41,7 +41,7 @@ class Config:
 
     output_path: Path = Path("KhiScrape")
     artworks_directory: str = "Artworks"  # Empty string = no subdirectory
-    max_filename_bytes: int = 255
+    max_name_bytes: int = 255
     invalid_chars_pattern: str = r'[\\/*?:"<>|]'
     invalid_chars_replacement: str = "_"
     max_concurrency: int = 4
@@ -85,9 +85,9 @@ class Config:
                 f"artworks_directory must be a string, got {type(self.artworks_directory)}"
             )
 
-        if not isinstance(self.max_filename_bytes, int) or self.max_filename_bytes < 1:
+        if not isinstance(self.max_name_bytes, int) or self.max_name_bytes < 32:
             raise ValueError(
-                f"max_filename_bytes must be a positive integer, got {self.max_filename_bytes}"
+                f"max_name_bytes must be at least 32, got {self.max_name_bytes}"
             )
 
         if (
@@ -203,39 +203,95 @@ class PathSanitizer:
     """Handles sanitization of paths and filenames for filesystem safety."""
 
     @staticmethod
-    def sanitize_filename(name: str, config: Config, is_temp: bool = False) -> str:
-        """Sanitize filename."""
-        sanitized = re.sub(
+    def _truncate_to_max_bytes(text: str, max_bytes: int) -> str:
+        """Truncate string."""
+        if max_bytes <= 0:
+            return ""
+
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+
+        truncated = encoded[:max_bytes]
+        # Avoid breaking UTF-8 sequences
+        while truncated and truncated[-1] & 0x80 and not (truncated[-1] & 0x40):
+            truncated = truncated[:-1]
+
+        return truncated.decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def sanitize_name(name: str, config: Config) -> str:
+        """Sanitize content name."""
+        return re.sub(
             config.invalid_chars_pattern,
             config.invalid_chars_replacement,
             name,
         )
 
-        max_bytes = config.max_filename_bytes
+    @staticmethod
+    def limit_filename_length(
+        prefix: str, name: str, suffix: str, config: Config, is_temp: bool = False
+    ) -> str:
+        """Apply length limiting to filename."""
+        max_bytes = config.max_name_bytes
         if is_temp:
             max_bytes -= 1  # Reserve one byte for the dot prefix
 
-        encoded_sanitized = sanitized.encode("utf-8")
-        if len(encoded_sanitized) > max_bytes:
-            truncated = encoded_sanitized[:max_bytes]
-            # Avoid breaking UTF-8 sequences
-            while truncated and truncated[-1] & 0x80 and not (truncated[-1] & 0x40):
-                truncated = truncated[:-1]
-            sanitized = truncated.decode("utf-8", errors="ignore")
+        full_name = prefix + name + suffix
+        encoded = full_name.encode("utf-8")
 
-        return sanitized
+        if len(encoded) <= max_bytes:
+            return full_name
+
+        available_bytes = max_bytes - len((prefix + suffix).encode("utf-8"))
+        truncated_name = PathSanitizer._truncate_to_max_bytes(name, available_bytes)
+        return prefix + truncated_name + suffix
+
+    @staticmethod
+    def limit_directory_name(name: str, config: Config) -> str:
+        """Apply length limiting to directory name."""
+        return PathSanitizer._truncate_to_max_bytes(name, config.max_name_bytes)
+
+    @staticmethod
+    def sanitize_and_limit_filename(
+        name: str,
+        config: Config,
+        prefix: str = "",
+        suffix: str = "",
+        is_temp: bool = False,
+    ) -> str:
+        """Sanitize and apply length limiting to filename."""
+        sanitized = PathSanitizer.sanitize_name(name, config)
+        return PathSanitizer.limit_filename_length(
+            prefix, sanitized, suffix, config, is_temp
+        )
+
+    @staticmethod
+    def sanitize_and_limit_directory(name: str, config: Config) -> str:
+        """Sanitize and apply length limiting to directory name."""
+        sanitized = PathSanitizer.sanitize_name(name, config)
+        return PathSanitizer.limit_directory_name(sanitized, config)
 
     @staticmethod
     def sanitize_url_filename(url: str, config: Config) -> str:
         """Sanitize filename from URL."""
         url_obj = yarl.URL(url)
         filename = url_obj.parts[-1] if url_obj.parts else "unknown"
-        return PathSanitizer.sanitize_filename(filename, config)
+        return PathSanitizer.sanitize_name(filename, config)
 
     @staticmethod
-    def sanitize_album_name(name: str, config: Config) -> str:
-        """Sanitize album name for use as directory name."""
-        return PathSanitizer.sanitize_filename(name, config)
+    def sanitize_and_limit_path(path: Path, config: Config) -> Path:
+        """Sanitize and limit each component of a path."""
+        anchor = path.anchor  # Extracts root part (e.g., "/", "C:\", "\\server\share")
+
+        components = path.parts[1:] if anchor else path.parts
+
+        sanitized_components = [
+            PathSanitizer.sanitize_and_limit_directory(comp, config)
+            for comp in components
+        ]
+
+        return Path(anchor, *sanitized_components)
 
 
 # -----------------------------------------------------------------------------
@@ -676,7 +732,12 @@ class ArtworkDownloader(BaseDownloader):
     ) -> bool:
         """Download a single artwork."""
         async with self.semaphore:
-            file_path = artwork_dir / artwork.filename
+            name_without_ext = Path(artwork.filename).stem
+            ext = Path(artwork.filename).suffix
+            final_name = PathSanitizer.sanitize_and_limit_filename(
+                name_without_ext, self.config, suffix=ext, is_temp=True
+            )
+            file_path = artwork_dir / final_name
             return await self._download_file(
                 session, artwork.url, file_path, album_url, context="Artwork"
             )
@@ -694,7 +755,10 @@ class ArtworkDownloader(BaseDownloader):
 
         artwork_dir = album_dir
         if self.config.artworks_directory:
-            artwork_dir = album_dir / self.config.artworks_directory
+            sanitized_dir = PathSanitizer.sanitize_and_limit_directory(
+                self.config.artworks_directory, self.config
+            )
+            artwork_dir = album_dir / sanitized_dir
             artwork_dir.mkdir(parents=True, exist_ok=True)
 
         self.logger.info(f"Downloading {len(artworks)} artwork(s)...")
@@ -808,13 +872,13 @@ class TrackDownloader(BaseDownloader):
     def _sanitize_track_filename(
         self,
         name: str,
-        is_temp: bool = False,
         track_number: int | None = None,
         disc_number: int | None = None,
         padding: int = 2,
+        suffix: str = "",
     ) -> str:
-        """Sanitize track filename to be filesystem-safe."""
-        sanitized_name = PathSanitizer.sanitize_filename(name, self.config, is_temp)
+        """Sanitize and apply length limiting to track filename."""
+        sanitized_name = PathSanitizer.sanitize_name(name, self.config)
 
         if track_number is not None:
             formatted_track = self._format_track_number(track_number, padding)
@@ -825,7 +889,9 @@ class TrackDownloader(BaseDownloader):
         else:
             prefix = ""
 
-        return prefix + sanitized_name
+        return PathSanitizer.limit_filename_length(
+            prefix, sanitized_name, suffix, self.config, is_temp=True
+        )
 
     def _display_tracklist(
         self, tracks: list[TrackInfo], padding_dict: dict[int | None, int]
@@ -1074,8 +1140,9 @@ class TrackDownloader(BaseDownloader):
                 track_number=track.number,
                 disc_number=track.disc_number,
                 padding=track_padding,
+                suffix=track.file_extension,
             )
-            file_path = album_dir / f"{sanitized_name}{track.file_extension}"
+            file_path = album_dir / sanitized_name
 
             return await self._download_file(
                 session, track.download_url, file_path, track.page_url, context="Track"
@@ -1173,7 +1240,7 @@ class KhinsiderDownloader:
                         self.logger.debug(
                             f"Extracted album name via {strategy.__name__}: {clean_text}"
                         )
-                        return PathSanitizer.sanitize_album_name(
+                        return PathSanitizer.sanitize_and_limit_directory(
                             clean_text, self.config
                         )
 
@@ -1181,7 +1248,7 @@ class KhinsiderDownloader:
         url_obj = yarl.URL(album_url)
         fallback = url_obj.parts[-1] if url_obj.parts else "unknown_album"
         self.logger.warning(f"Using URL fallback for album name: {fallback}")
-        return PathSanitizer.sanitize_album_name(fallback, self.config)
+        return PathSanitizer.sanitize_and_limit_directory(fallback, self.config)
 
     def _display_album_info(
         self,
@@ -1299,6 +1366,10 @@ class KhinsiderDownloader:
         """Download all artworks and tracks from an album."""
         self.logger.info(f"Processing album: {album_url}")
 
+        sanitized_output_path = PathSanitizer.sanitize_and_limit_path(
+            self.config.output_path, self.config
+        )
+
         connector = TCPConnector(limit=self.config.max_concurrency * 2)
         async with aiohttp.ClientSession(
             connector=connector, headers=self.artwork_downloader.headers
@@ -1313,7 +1384,7 @@ class KhinsiderDownloader:
             soup = self._make_soup(html)
 
             album_name = await self._get_album_name(soup, album_url)
-            album_dir = self.config.output_path / album_name
+            album_dir = sanitized_output_path / album_name
             album_dir.mkdir(parents=True, exist_ok=True)
 
             tracks = await self.track_downloader._get_track_list(soup, album_url)
