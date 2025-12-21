@@ -5,7 +5,7 @@ from setuptools import setup
 
 setup(
     name="khiscrape",
-    version="0.2025.12.17.0",
+    version="0.2025.12.22.0",
     description="Asynchronous Khinsider Music Downloader",
     author="PanChi (justpanchi)",
     author_email="",
