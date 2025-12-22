@@ -1,12 +1,12 @@
 # KhiScrape - Khinsider Music Downloader
 
-Asynchronous Python script to download complete game soundtracks from [Khinsider](https://downloads.khinsider.com/). Fetches all tracks from given album URLs, selects the best available format from your preferred list, and downloads them concurrently with retry handling, rate limiting, and automatic disc/track number extraction (zero-padding enabled by default).
+Asynchronous Python script to download game soundtracks from [Khinsider](https://downloads.khinsider.com/). Fetches all tracks from given album URLs, selects the best available format from your format list, and downloads them concurrently with retry handling, rate limiting, and automatic disc/track number extraction (zero-padding enabled by default).
 
 ## ✨ Features
 
 ### 🎯 Core Functionality
-- **Complete Album Downloads** - Fetch all artworks and tracks from provided album URLs
-- **User Format Selection** - Automatically chooses best available audio format from your preferred list
+- **Album Downloads** - Fetch all artworks and tracks from provided album URLs
+- **User Format Selection** - Automatically chooses best available audio format from your format list (tries each format in order of preference)
 - **Multi-Disc Support** - Automatic disc detection
 - **Track Padding** - Automatic track number extraction with configurable padding
 
@@ -28,29 +28,72 @@ Asynchronous Python script to download complete game soundtracks from [Khinsider
 ## 🚀 Quick Start
 
 ### Installation
+
+KhiScrape can be installed either as a standalone script or as a packaged wheel via Git.
+
+#### Install as Script
+
+**Install the dependencies:**
+```sh
+pip install aiohttp aiofiles beautifulsoup4 colorama yarl
+```
+
+**Install optional dependencies:**
+```sh
+pip install lxml
+```
+
+**Download the script file (curl/wget):**
+```sh
+curl -JO https://raw.githubusercontent.com/justpanchi/KhiScrape/refs/heads/main/khiscrape.py
+```
+
+```sh
+wget --content-disposition https://raw.githubusercontent.com/justpanchi/KhiScrape/refs/heads/main/khiscrape.py
+```
+
+#### Install as Wheel
+
+Requires [Git](https://git-scm.com/install/) to be installed.
+
+**Without lxml:**
 ```sh
 pip install "khiscrape @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
 
+**With lxml:**
 ```sh
 pip install "khiscrape[lxml] @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
 
-### Basic Usage
+### Usage
+
+**Script installation:** Use `python3 khiscrape.py [OPTIONS] URLs...`
+**Wheel installation:** Use `khiscrape [OPTIONS] URLs...`
+
+#### Basic Examples
+
+**Single album download:**
 ```sh
-python3 khiscrape.py https://downloads.khinsider.com/game-soundtracks/album/mario-kart-8-full-gamerip
+khiscrape https://downloads.khinsider.com/game-soundtracks/album/mario-kart-8-full-gamerip
 ```
 
-### Advanced Usage
+**Multiple album downloads:**
 ```sh
-python3 khiscrape.py \
-  --output "$HOME/Music/Soundtracks" \
-  --concurrency 3 \
-  --rate-limit 3 \
+khiscrape url1 url2 url3
+```
+
+#### Advanced Example
+
+```sh
+khiscrape \
+  --output "$HOME/Music/Khinsider" \
+  --concurrency 8 \
+  --rate-limit 4 \
   --formats flac,mp3 \
-  --track-padding 2 \
+  --padding-mode total \
   https://downloads.khinsider.com/game-soundtracks/album/pokemon-black-and-white-super-music-collection
-  ```
+```
 
 ## ⚙️ Configuration Options
 
@@ -58,7 +101,7 @@ python3 khiscrape.py \
 |--------|-------------|---------|
 | `urls` | Album URLs to download (required) | - |
 | `-o, --output PATH` | Output directory | `KhiScrape` |
-| `-a, --artworks-dir PATH` | Subdirectory for artworks | `Artworks` |
+| `-a, --artworks-dir DIR` | Subdirectory for artworks (empty = no subdirectory) | `Artworks` |
 | `-c, --concurrency NUM` | Concurrent downloads | `4` |
 | `-r, --rate-limit RPS` | Requests per second | `2.0` |
 | `-j, --jitter JITTER` | Jitter as percentage of base delay | `70%` |
@@ -80,6 +123,8 @@ python3 khiscrape.py \
   - `beautifulsoup4` - HTML parsing
   - `colorama` - Cross-platform colored terminal output
   - `yarl` - URL handling (dependency of `aiohttp`)
+- **Optional Dependencies:**
+  - `lxml` - HTML parser
 
 ---
 
