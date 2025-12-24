@@ -16,7 +16,7 @@ Asynchronous Python script to download game soundtracks from [Khinsider](https:/
 - **Retry Mechanism** - Automatic retries with exponential backoff for failed downloads
 - **Atomic Downloads** - Downloads are written to a temporary file and moved upon successful completion
 - **File Verification** - Size validation to ensure complete downloads
-- **Filesystem Safety** - Automatic filename sanitization for cross-platform compatibility
+- **Filesystem Safety** - Automatic path sanitization for cross-platform compatibility
 
 ### 🎛️ Configuration
 - **Chunked Downloads** - Configurable chunk sizes for large files
