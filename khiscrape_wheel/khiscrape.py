@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Asynchronous Khinsider Music Downloader"""
 
-__version__ = "0.2025.12.22.0"
+__version__ = "0.2025.12.28.0"
 
 import argparse
 import asyncio
@@ -54,11 +54,11 @@ class Config:
     connection_timeout: float = 15.0
     total_timeout: float = 180.0
     read_timeout: float = 60.0
-    preferred_formats: tuple[str, ...] = field(
-        default=("flac", "wav", "m4a", "opus", "ogg", "aac", "mp3")
-    )
     html_parser: str = field(
         default_factory=lambda: "lxml" if LXML_AVAILABLE else "html.parser"
+    )
+    preferred_formats: tuple[str, ...] = field(
+        default=("flac", "wav", "m4a", "opus", "ogg", "aac", "mp3")
     )
     track_padding: int | None = None  # None = auto-detect
     padding_mode: str = "disc"  # "disc" or "total"
@@ -68,6 +68,7 @@ class Config:
             "(KHTML, like Gecko) Chrome/143.0.7499.40 Safari/537.36"
         )
     )
+    base_album_url: str = "https://downloads.khinsider.com/game-soundtracks/album/"
     base_referer: str = "https://downloads.khinsider.com/"
     debug: bool = False
 
@@ -143,18 +144,6 @@ class Config:
                     f"{timeout_name} must be positive number, got {timeout_value}"
                 )
 
-        if not isinstance(self.preferred_formats, tuple):
-            raise ValueError(
-                f"preferred_formats must be a tuple, got {type(self.preferred_formats)}"
-            )
-        if not self.preferred_formats:
-            raise ValueError("preferred_formats must not be empty")
-        for fmt in self.preferred_formats:
-            if not isinstance(fmt, str) or not fmt:
-                raise ValueError(
-                    f"All preferred_formats must be non-empty strings, got {self.preferred_formats}"
-                )
-
         if not isinstance(self.html_parser, str):
             raise ValueError(
                 f"html_parser must be string, got {type(self.html_parser)}"
@@ -170,6 +159,18 @@ class Config:
             raise ValueError(
                 "lxml parser requested but lxml is not installed. Falling back to html.parser."
             )
+
+        if not isinstance(self.preferred_formats, tuple):
+            raise ValueError(
+                f"preferred_formats must be a tuple, got {type(self.preferred_formats)}"
+            )
+        if not self.preferred_formats:
+            raise ValueError("preferred_formats must not be empty")
+        for fmt in self.preferred_formats:
+            if not isinstance(fmt, str) or not fmt:
+                raise ValueError(
+                    f"All preferred_formats must be non-empty strings, got {self.preferred_formats}"
+                )
 
         if self.track_padding is not None:
             if not isinstance(self.track_padding, int) or not (
@@ -190,6 +191,11 @@ class Config:
         if not isinstance(self.user_agent, str) or not self.user_agent:
             raise ValueError(
                 f"user_agent must be non-empty string, got {self.user_agent}"
+            )
+
+        if not isinstance(self.base_album_url, str) or not self.base_album_url:
+            raise ValueError(
+                f"base_album_url must be non-empty string, got {self.base_album_url}"
             )
 
         if not isinstance(self.base_referer, str) or not self.base_referer:
@@ -470,9 +476,9 @@ class BaseDownloader:
 
         self.headers = {
             "User-Agent": config.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept": "text/html;q=1.0,*/*;q=0.9",
+            "Accept-Language": "en-US;q=1.0,en;q=0.9",
+            "Accept-Encoding": "identity;q=1.0,gzip;q=0.9,deflate;q=0.8,br;q=0.7",
             "DNT": "1",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
@@ -1210,6 +1216,27 @@ class KhinsiderDownloader:
         )
         self.track_downloader = TrackDownloader(config, self.logger, self.rate_limiter)
 
+    def _normalize_album_url(self, input_str: str) -> str:
+        """Normalize input to album URL."""
+        # Strip query parameters and fragments
+        clean_input = re.split(r"[?#]", input_str)[0]
+
+        pattern = r"(?:/game-soundtracks)?/album/([a-zA-Z0-9_-]+)"
+        match = re.search(pattern, clean_input)
+
+        if match:
+            album_id = match.group(1)
+        else:
+            album_id = clean_input.strip("/")
+
+            if "/" in album_id:
+                album_id = album_id.split("/")[-1]
+
+        if not album_id:
+            raise ValueError(f"Could not extract album ID from input: {input_str}")
+
+        return str(yarl.URL(self.config.base_album_url) / album_id)
+
     def _make_soup(self, html: str) -> BeautifulSoup:
         """Create BeautifulSoup object using configured parser."""
         return BeautifulSoup(html, self.config.html_parser)
@@ -1364,8 +1391,9 @@ class KhinsiderDownloader:
                     "", extra={"key_value": True, "key": key, "value": value}
                 )
 
-    async def download_album(self, album_url: str) -> bool:
+    async def download_album(self, album_input: str) -> bool:
         """Download all artworks and tracks from an album."""
+        album_url = self._normalize_album_url(album_input)
         self.logger.info(f"Processing album: {album_url}")
 
         sanitized_output_path = PathSanitizer.sanitize_and_limit_path(
@@ -1432,8 +1460,8 @@ class KhinsiderDownloader:
 
 async def main() -> None:
     """Main entry point."""
-    default_preferred_formats = Config.__dataclass_fields__["preferred_formats"].default
     default_html_parser = Config.__dataclass_fields__["html_parser"].default_factory()
+    default_preferred_formats = Config.__dataclass_fields__["preferred_formats"].default
 
     parser = argparse.ArgumentParser(
         description="Khinsider Music Downloader",
@@ -1506,19 +1534,19 @@ Examples:
     )
 
     parser.add_argument(
-        "-f",
-        "--formats",
-        type=lambda s: [f.strip().lower() for f in s.split(",")],
-        default=default_preferred_formats,
-        help=f"Preferred formats in order (default: {','.join(default_preferred_formats)})",
-    )
-
-    parser.add_argument(
         "-b",
         "--html-parser",
         type=str,
         choices=["html.parser", "lxml", "html5lib"],
         help=f"HTML parser to use (default: {default_html_parser})",
+    )
+
+    parser.add_argument(
+        "-f",
+        "--formats",
+        type=lambda s: [f.strip().lower() for f in s.split(",")],
+        default=default_preferred_formats,
+        help=f"Preferred formats in order (default: {','.join(default_preferred_formats)})",
     )
 
     parser.add_argument(
@@ -1560,8 +1588,8 @@ Examples:
             jitter_percent=args.jitter,
             chunk_size=args.chunk_size if args.chunk_size != 0 else None,
             max_retries=args.max_retries,
-            preferred_formats=tuple(args.formats),
             html_parser=args.html_parser if args.html_parser else default_html_parser,
+            preferred_formats=tuple(args.formats),
             track_padding=args.track_padding,
             padding_mode=args.padding_mode,
             debug=args.debug,
