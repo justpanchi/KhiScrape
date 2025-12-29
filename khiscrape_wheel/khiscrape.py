@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Asynchronous Khinsider Music Downloader"""
 
-__version__ = "0.2025.12.28.0"
+__version__ = "0.2025.12.29.0"
 
 import argparse
 import asyncio
@@ -1084,7 +1084,12 @@ class TrackDownloader(BaseDownloader):
         if not response:
             return False
 
-        html = await response.text()
+        try:
+            html = await response.text()
+        except UnicodeDecodeError:
+            html_bytes = await response.read()
+            html = html_bytes.decode("utf-8", errors="replace")
+
         soup = self._make_soup(html)
 
         download_links = []
@@ -1221,7 +1226,7 @@ class KhinsiderDownloader:
         # Strip query parameters and fragments
         clean_input = re.split(r"[?#]", input_str)[0]
 
-        pattern = r"(?:/game-soundtracks)?/album/([a-zA-Z0-9_-]+)"
+        pattern = r"(?:/game-soundtracks)?/album/([^/?#]+)"
         match = re.search(pattern, clean_input)
 
         if match:
@@ -1410,7 +1415,12 @@ class KhinsiderDownloader:
             if not response:
                 return False
 
-            html = await response.text()
+            try:
+                html = await response.text()
+            except UnicodeDecodeError:
+                html_bytes = await response.read()
+                html = html_bytes.decode("utf-8", errors="replace")
+
             soup = self._make_soup(html)
 
             album_name = await self._get_album_name(soup, album_url)
