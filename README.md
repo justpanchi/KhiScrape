@@ -5,7 +5,7 @@ Asynchronous Python script to download game soundtracks from [Khinsider](https:/
 ## ✨ Features
 
 ### 🎯 Core Functionality
-- **Album Downloads** - Fetch all artworks and tracks from provided album URLs
+- **Album Downloads** - Fetch all artworks and tracks from provided album URLs (supports IDs as input)
 - **User Format Selection** - Automatically chooses best available audio format from your format list (tries each format in order of preference)
 - **Multi-Disc Support** - Automatic disc detection
 - **Track Padding** - Automatic track number extraction with configurable padding
@@ -68,8 +68,8 @@ pip install "khiscrape[lxml] @ git+https://github.com/justpanchi/KhiScrape#subdi
 
 ### Usage
 
-**Script installation:** Use `python3 khiscrape.py [OPTIONS] URLs...`
-**Wheel installation:** Use `khiscrape [OPTIONS] URLs...`
+**Script installation:** Use `python3 khiscrape.py [OPTIONS] URLs/IDs...`
+**Wheel installation:** Use `khiscrape [OPTIONS] URLs/IDs...`
 
 #### Basic Examples
 
@@ -99,7 +99,7 @@ khiscrape \
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `urls` | Album URLs to download (required) | - |
+| `urls` | Album URLs or IDs to download (required) | - |
 | `-o, --output PATH` | Output directory | `KhiScrape` |
 | `-a, --artworks-dir DIR` | Subdirectory for artworks (empty = no subdirectory) | `Artworks` |
 | `-c, --concurrency NUM` | Concurrent downloads | `4` |
