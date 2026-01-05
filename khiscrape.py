@@ -50,8 +50,8 @@ class Config:
     chunk_size: int | None = 512 * 1024  # 512 KiB
     max_retries: int = 3
     connection_timeout: float = 15.0
-    total_timeout: float = 180.0
     read_timeout: float = 60.0
+    total_timeout: float = 180.0
     html_parser: str = field(
         default_factory=lambda: "lxml" if LXML_AVAILABLE else "html.parser"
     )
@@ -68,6 +68,8 @@ class Config:
     )
     base_album_url: str = "https://downloads.khinsider.com/game-soundtracks/album/"
     base_referer: str = "https://downloads.khinsider.com/"
+    display_album_info: bool = True
+    display_tracklist: bool = True
     debug: bool = False
 
     def __post_init__(self) -> None:
@@ -134,8 +136,8 @@ class Config:
 
         for timeout_name, timeout_value in [
             ("connection_timeout", self.connection_timeout),
-            ("total_timeout", self.total_timeout),
             ("read_timeout", self.read_timeout),
+            ("total_timeout", self.total_timeout),
         ]:
             if not isinstance(timeout_value, (int, float)) or timeout_value <= 0:
                 raise ValueError(
@@ -201,6 +203,16 @@ class Config:
                 f"base_referer must be non-empty string, got {self.base_referer}"
             )
 
+        if not isinstance(self.display_album_info, bool):
+            raise ValueError(
+                f"display_album_info must be boolean, got {type(self.display_album_info)}"
+            )
+
+        if not isinstance(self.display_tracklist, bool):
+            raise ValueError(
+                f"display_tracklist must be boolean, got {type(self.display_tracklist)}"
+            )
+
         if not isinstance(self.debug, bool):
             raise ValueError(f"debug must be boolean, got {type(self.debug)}")
 
@@ -236,7 +248,7 @@ class PathSanitizer:
 
     @staticmethod
     def limit_filename_length(
-        prefix: str, name: str, suffix: str, config: Config, is_temp: bool = False
+        name: str, config: Config, prefix: str, suffix: str, is_temp: bool = False
     ) -> str:
         """Apply length limiting to filename."""
         max_bytes = config.max_name_bytes
@@ -269,7 +281,7 @@ class PathSanitizer:
         """Sanitize and apply length limiting to filename."""
         sanitized = PathSanitizer.sanitize_name(name, config)
         return PathSanitizer.limit_filename_length(
-            prefix, sanitized, suffix, config, is_temp
+            sanitized, config, prefix, suffix, is_temp
         )
 
     @staticmethod
@@ -386,7 +398,7 @@ class ColorFormatter(logging.Formatter):
 
 
 def setup_logging(
-    debug: bool = False, logger: logging.Logger | None = None
+    logger: logging.Logger | None = None, debug: bool = False
 ) -> logging.Logger:
     """Set up logging for the application."""
     if logger is None:
@@ -468,8 +480,8 @@ class BaseDownloader:
 
         self.timeout = ClientTimeout(
             connect=config.connection_timeout,
-            total=config.total_timeout,
             sock_read=config.read_timeout,
+            total=config.total_timeout,
         )
 
         self.headers = {
@@ -545,20 +557,6 @@ class BaseDownloader:
                 except ValueError:
                     self.logger.debug(f"Invalid Content-Length: {content_length}")
         return None
-
-    async def _should_skip_download(self, file_path: Path, expected_size: int) -> bool:
-        """Check if file already exists with correct size."""
-        if not file_path.exists():
-            return False
-
-        actual_size = file_path.stat().st_size
-        if actual_size == expected_size:
-            return True
-
-        self.logger.debug(
-            f"File size mismatch: local {actual_size} vs remote {expected_size}"
-        )
-        return False
 
     async def _download_file(
         self,
@@ -733,8 +731,8 @@ class ArtworkDownloader(BaseDownloader):
         self,
         session: aiohttp.ClientSession,
         artwork: ArtworkInfo,
-        artwork_dir: Path,
         album_url: str,
+        artwork_dir: Path,
     ) -> bool:
         """Download a single artwork."""
         async with self.semaphore:
@@ -752,8 +750,8 @@ class ArtworkDownloader(BaseDownloader):
         self,
         session: aiohttp.ClientSession,
         artworks: list[ArtworkInfo],
-        album_dir: Path,
         album_url: str,
+        album_dir: Path,
     ) -> tuple[int, int]:
         """Download all artworks for an album."""
         if not artworks:
@@ -771,7 +769,7 @@ class ArtworkDownloader(BaseDownloader):
 
         download_tasks = []
         for artwork in artworks:
-            task = self._download_artwork(session, artwork, artwork_dir, album_url)
+            task = self._download_artwork(session, artwork, album_url, artwork_dir)
             download_tasks.append(task)
 
         results = await asyncio.gather(*download_tasks, return_exceptions=True)
@@ -801,7 +799,7 @@ class TrackDownloader(BaseDownloader):
         return len(disc_numbers) > 1
 
     def _calculate_track_padding(
-        self, tracks: list[TrackInfo]
+        self, tracks: list[TrackInfo], is_multi_disc: bool
     ) -> dict[int | None, int]:
         """Calculate track number padding per disc based on padding mode and track data."""
         if self.config.track_padding is not None:
@@ -816,8 +814,6 @@ class TrackDownloader(BaseDownloader):
                 return {disc: manual_padding for disc in disc_numbers}
             else:
                 return {None: manual_padding}
-
-        is_multi_disc = self._is_multi_disc(tracks)
 
         if not is_multi_disc:
             # Single disc: use total track count
@@ -896,7 +892,7 @@ class TrackDownloader(BaseDownloader):
             prefix = ""
 
         return PathSanitizer.limit_filename_length(
-            prefix, sanitized_name, suffix, self.config, is_temp=True
+            sanitized_name, self.config, prefix, suffix, is_temp=True
         )
 
     def _display_tracklist(
@@ -1129,8 +1125,8 @@ class TrackDownloader(BaseDownloader):
         self,
         session: aiohttp.ClientSession,
         track: TrackInfo,
-        album_dir: Path,
         album_url: str,
+        album_dir: Path,
         padding_dict: dict[int | None, int],
     ) -> bool:
         """Download a single track."""
@@ -1163,24 +1159,21 @@ class TrackDownloader(BaseDownloader):
         self,
         session: aiohttp.ClientSession,
         tracks: list[TrackInfo],
-        album_dir: Path,
         album_url: str,
+        album_dir: Path,
+        padding_dict: dict[int | None, int],
     ) -> tuple[int, int]:
         """Download all tracks for an album."""
         if not tracks:
             self.logger.error("No tracks found in album")  # Ooops!
             return 0, 0
 
-        padding_dict = self._calculate_track_padding(tracks)
-
-        self._display_tracklist(tracks, padding_dict)
-
         self.logger.info(f"Downloading {len(tracks)} track(s)...")
 
         download_tasks = []
         for track in tracks:
             task = self._download_track(
-                session, track, album_dir, album_url, padding_dict
+                session, track, album_url, album_dir, padding_dict
             )
             download_tasks.append(task)
 
@@ -1285,18 +1278,15 @@ class KhinsiderDownloader:
     def _display_album_info(
         self,
         album_name: str,
-        album_dir: Path,
         tracks: list[TrackInfo],
-        padding_dict: dict[int | None, int],
+        is_multi_disc: bool,
+        disc_count: int,
         artwork_count: int,
+        disc_numbers: list[int | None],
+        album_dir: Path,
+        padding_dict: dict[int | None, int],
     ) -> None:
         """Display album information and configuration."""
-        is_multi_disc = self.track_downloader._is_multi_disc(tracks)
-        disc_numbers = sorted(
-            {track.disc_number for track in tracks if track.disc_number is not None}
-        )
-        disc_count = len(disc_numbers) or 1
-
         base_delay_ms = (1.0 / self.config.rate_limit) * 1000
         max_delay_ms = base_delay_ms * (1 + self.config.jitter_percent / 100.0)
 
@@ -1306,8 +1296,6 @@ class KhinsiderDownloader:
         lines.append(("=" * 60, "separator"))
         lines.append(("Album", album_name, "key_value"))
         lines.append(("Output", str(album_dir), "key_value"))
-        lines.append(("Tracks", str(len(tracks)), "key_value"))
-        lines.append(("Artworks", str(artwork_count), "key_value"))
         lines.append(
             (
                 "Artworks Directory",
@@ -1319,12 +1307,33 @@ class KhinsiderDownloader:
                 "key_value",
             )
         )
+        lines.append(("Artworks", str(artwork_count), "key_value"))
+        lines.append(("Tracks", str(len(tracks)), "key_value"))
         lines.append(
             (
                 "Discs",
                 f"{disc_count} {'(Multi-Disc)' if is_multi_disc else '(Single Disc)'}",
                 "key_value",
             )
+        )
+        lines.append(("-" * 60, "separator"))
+        lines.append(("CONFIGURATION", "header"))
+        lines.append(("-" * 60, "separator"))
+        lines.append(
+            ("Concurrent Downloads", str(self.config.max_concurrency), "key_value")
+        )
+        lines.append(("Rate Limit", f"{self.config.rate_limit} RPS", "key_value"))
+        lines.append(("Jitter", f"{self.config.jitter_percent}%", "key_value"))
+        lines.append(
+            ("Request Delay", f"{base_delay_ms:.0f}-{max_delay_ms:.0f} ms", "key_value")
+        )
+        lines.append(
+            ("Chunk Size", str(self.config.chunk_size or "Single write"), "key_value")
+        )
+        lines.append(("Max Retries", str(self.config.max_retries), "key_value"))
+        lines.append(("HTML Parser", self.config.html_parser, "key_value"))
+        lines.append(
+            ("Preferred Formats", ", ".join(self.config.preferred_formats), "key_value")
         )
 
         if self.config.track_padding is not None:
@@ -1358,25 +1367,6 @@ class KhinsiderDownloader:
 
         if self.config.track_padding is None:
             lines.append(("Padding Mode", self.config.padding_mode, "key_value"))
-        lines.append(("-" * 60, "separator"))
-        lines.append(("CONFIGURATION", "header"))
-        lines.append(("-" * 60, "separator"))
-        lines.append(
-            ("Concurrent Downloads", str(self.config.max_concurrency), "key_value")
-        )
-        lines.append(("Rate Limit", f"{self.config.rate_limit} RPS", "key_value"))
-        lines.append(("Jitter", f"{self.config.jitter_percent}%", "key_value"))
-        lines.append(
-            ("Request Delay", f"{base_delay_ms:.0f}-{max_delay_ms:.0f} ms", "key_value")
-        )
-        lines.append(
-            ("Preferred Formats", ", ".join(self.config.preferred_formats), "key_value")
-        )
-        lines.append(("Max Retries", str(self.config.max_retries), "key_value"))
-        lines.append(
-            ("Chunk Size", str(self.config.chunk_size or "Single write"), "key_value")
-        )
-        lines.append(("HTML Parser", self.config.html_parser, "key_value"))
         lines.append(("=" * 60, "separator"))
 
         for line in lines:
@@ -1431,22 +1421,44 @@ class KhinsiderDownloader:
                 return False
 
             artworks = await self.artwork_downloader._get_artwork_list(soup, album_url)
-            padding_dict = self.track_downloader._calculate_track_padding(tracks)
 
-            self._display_album_info(
-                album_name, album_dir, tracks, padding_dict, len(artworks)
+            is_multi_disc = self.track_downloader._is_multi_disc(tracks)
+            disc_numbers = sorted(
+                {track.disc_number for track in tracks if track.disc_number is not None}
             )
+            disc_count = len(disc_numbers) or 1
+
+            padding_dict = self.track_downloader._calculate_track_padding(
+                tracks, is_multi_disc
+            )
+
+            if self.config.display_album_info:
+                self._display_album_info(
+                    album_name,
+                    tracks,
+                    is_multi_disc,
+                    disc_count,
+                    len(artworks),
+                    disc_numbers,
+                    album_dir,
+                    padding_dict,
+                )
+            else:
+                self.logger.info(f"Output: {album_dir}")
+
+            if self.config.display_tracklist:
+                self.track_downloader._display_tracklist(tracks, padding_dict)
 
             # Download artworks
             artwork_success, artwork_failed = (
                 await self.artwork_downloader.download_artworks(
-                    session, artworks, album_dir, album_url
+                    session, artworks, album_url, album_dir
                 )
             )
 
             # Download tracks
             track_success, track_failed = await self.track_downloader.download_tracks(
-                session, tracks, album_dir, album_url
+                session, tracks, album_url, album_dir, padding_dict
             )
 
             total_success = artwork_success + track_success
@@ -1476,14 +1488,12 @@ async def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s https://downloads.khinsider.com/game-soundtracks/album/mario-kart-8-full-gamerip
-  %(prog)s --concurrency 8 --rate-limit 4 url1 url2 url3
-  %(prog)s --output "$HOME/Music" --formats flac,mp3 url1 url2
-  %(prog)s --jitter 50 --rate-limit 2 url1  # 2 RPS with 50%% jitter (500-750ms delays)
+  %(prog)s https://downloads.khinsider.com/game-soundtracks/album/mario-kart-8-full-gamerip # URLs or IDs (mario-kart-8-full-gamerip)
+  %(prog)s --output "$HOME/Music/Khinsider" --concurrency 8 --rate-limit 4 --formats flac,mp3 --padding-mode total url1 url2 url3
         """,
     )
 
-    parser.add_argument("urls", nargs="+", help="Album URLs to download")
+    parser.add_argument("urls", nargs="+", help="Album URLs or IDs to download")
 
     parser.add_argument(
         "-o",
@@ -1581,7 +1591,7 @@ Examples:
     args = parser.parse_args()
 
     # Set up logging for CLI usage
-    logger = setup_logging(args.debug)
+    logger = setup_logging(debug=args.debug)
 
     try:
         config = Config(
