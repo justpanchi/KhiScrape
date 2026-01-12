@@ -805,7 +805,7 @@ class TrackDownloader(BaseDownloader):
         if self.config.track_padding is not None:
             # Manual padding overrides everything
             manual_padding = self.config.track_padding
-            if self._is_multi_disc(tracks):
+            if is_multi_disc:
                 disc_numbers = {
                     track.disc_number
                     for track in tracks
