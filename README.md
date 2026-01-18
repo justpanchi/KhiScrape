@@ -38,7 +38,7 @@ KhiScrape can be installed either as a standalone script or as a packaged wheel 
 pip install aiohttp aiofiles beautifulsoup4 colorama yarl
 ```
 
-**Install optional dependencies:**
+**Install optional dependencies (requires libxml2, libxslt):**
 ```sh
 pip install lxml
 ```
@@ -56,7 +56,7 @@ wget --content-disposition https://raw.githubusercontent.com/justpanchi/KhiScrap
 
 Requires [Git](https://git-scm.com/install/) to be installed.
 
-**Without lxml:**
+**Without lxml (requires libxml2, libxslt):**
 ```sh
 pip install "khiscrape @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
