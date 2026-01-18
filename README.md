@@ -56,12 +56,12 @@ wget --content-disposition https://raw.githubusercontent.com/justpanchi/KhiScrap
 
 Requires [Git](https://git-scm.com/install/) to be installed.
 
-**Without lxml (requires libxml2, libxslt):**
+**Without lxml:**
 ```sh
 pip install "khiscrape @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
 
-**With lxml:**
+**With lxml (requires libxml2, libxslt):**
 ```sh
 pip install "khiscrape[lxml] @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
