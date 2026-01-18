@@ -29,7 +29,7 @@ Asynchronous Python script to download game soundtracks from [Khinsider](https:/
 
 ### Installation
 
-KhiScrape can be installed either as a standalone script or as a packaged wheel via Git.
+KhiScrape can be installed either as a standalone script or as a packaged wheel. If you choose to install [lxml](https://github.com/lxml/lxml), building it requires libxml2 and libxslt to be installed.
 
 #### Install as Script
 
@@ -38,7 +38,7 @@ KhiScrape can be installed either as a standalone script or as a packaged wheel 
 pip install aiohttp aiofiles beautifulsoup4 colorama yarl
 ```
 
-**Install optional dependencies (requires libxml2, libxslt):**
+**Install optional dependencies:**
 ```sh
 pip install lxml
 ```
@@ -61,7 +61,7 @@ Requires [Git](https://git-scm.com/install/) to be installed.
 pip install "khiscrape @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
 
-**With lxml (requires libxml2, libxslt):**
+**With lxml:**
 ```sh
 pip install "khiscrape[lxml] @ git+https://github.com/justpanchi/KhiScrape#subdirectory=khiscrape_wheel"
 ```
