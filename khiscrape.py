@@ -16,8 +16,7 @@ import aiohttp
 from aiohttp import ClientTimeout, TCPConnector
 from bs4 import BeautifulSoup
 from colorama import Fore, Style, init
-import yarl
-
+from yarl import URL
 
 init(autoreset=True)
 
@@ -47,7 +46,7 @@ class Config:
     max_concurrency: int = 4
     rate_limit: float = 2.0  # requests per second
     jitter_percent: float = 70.0  # Jitter as percentage of base delay
-    chunk_size: int | None = 512 * 1024  # 512 KiB
+    chunk_size: int | None = 2 * 1024 * 1024  # 2 MiB
     max_retries: int = 3
     connection_timeout: float = 15.0
     read_timeout: float = 60.0
@@ -293,7 +292,7 @@ class PathSanitizer:
     @staticmethod
     def sanitize_url_filename(url: str, config: Config) -> str:
         """Sanitize filename from URL."""
-        url_obj = yarl.URL(url)
+        url_obj = URL(url)
         filename = url_obj.parts[-1] if url_obj.parts else "unknown"
         return PathSanitizer.sanitize_name(filename, config)
 
@@ -367,7 +366,7 @@ class ColorFormatter(logging.Formatter):
         "TRACKLIST": "[TRACKLIST]",
     }
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         if hasattr(record, "separator"):
             color = self.COLORS["SEPARATOR"]
             return f"{color}{record.getMessage()}{Style.RESET_ALL}"
@@ -730,8 +729,8 @@ class ArtworkDownloader(BaseDownloader):
             for img_div in album_images:
                 img_link = img_div.find("a", href=True)
                 if img_link:
-                    base_url = yarl.URL(album_url)
-                    img_url = str(base_url.join(yarl.URL(img_link["href"])))
+                    base_url = URL(album_url)
+                    img_url = str(base_url.join(URL(img_link["href"])))
 
                     # Skip thumbnail URLs
                     if "/thumbs/" in img_url:
@@ -1070,8 +1069,8 @@ class TrackDownloader(BaseDownloader):
                     track_link = track_name_cell.find("a", href=True)
                     if track_link:
                         track_name = track_link.get_text().strip()
-                        base_url = yarl.URL(album_url)
-                        track_url = str(base_url.join(yarl.URL(track_link["href"])))
+                        base_url = URL(album_url)
+                        track_url = str(base_url.join(URL(track_link["href"])))
 
                 if track_name and track_url:
                     track = TrackInfo(
@@ -1125,8 +1124,8 @@ class TrackDownloader(BaseDownloader):
         for fmt in self.config.preferred_formats:
             for href, text in download_links:
                 if f"download as {fmt}" in text:
-                    base_url = yarl.URL(track.page_url)
-                    download_url = str(base_url.join(yarl.URL(href)))
+                    base_url = URL(track.page_url)
+                    download_url = str(base_url.join(URL(href)))
                     self.logger.debug(
                         f"{specific_context}: Trying format {fmt}: {download_url}"
                     )
@@ -1250,7 +1249,7 @@ class KhinsiderDownloader:
         if not album_id:
             raise ValueError(f"Could not extract album ID from input: {input_str}")
 
-        return str(yarl.URL(self.config.base_album_url) / album_id)
+        return str(URL(self.config.base_album_url) / album_id)
 
     async def _get_album_name(self, soup: BeautifulSoup, album_url: str) -> str:
         """Extract album name from HTML with fallbacks."""
@@ -1261,7 +1260,7 @@ class KhinsiderDownloader:
             # Strategy 2: title tag
             lambda: soup.find("title"),
             # Strategy 3: meta description
-            lambda: soup.find("meta", {"name": "description"}),
+            lambda: soup.find("meta", {"name": "description"}),  # needs fix
         ]
 
         for strategy in strategies:
@@ -1285,7 +1284,7 @@ class KhinsiderDownloader:
                         )
 
         # Fallback: use URL path
-        url_obj = yarl.URL(album_url)
+        url_obj = URL(album_url)
         fallback = url_obj.parts[-1] if url_obj.parts else "unknown_album"
         self.logger.warning(f"Using URL fallback for album name: {fallback}")
         return PathSanitizer.sanitize_and_limit_directory(fallback, self.config)
@@ -1494,8 +1493,7 @@ class KhinsiderDownloader:
 
 async def main() -> None:
     """Main entry point."""
-    default_html_parser = Config.__dataclass_fields__["html_parser"].default_factory()
-    default_preferred_formats = Config.__dataclass_fields__["preferred_formats"].default
+    default_config = Config()
 
     parser = argparse.ArgumentParser(
         description="Khinsider Music Downloader",
@@ -1513,56 +1511,56 @@ Examples:
         "-o",
         "--output",
         type=Path,
-        default=Config.__dataclass_fields__["output_path"].default,
-        help=f"Base output directory (default: {Config.__dataclass_fields__['output_path'].default})",
+        default=default_config.output_path,
+        help=f"Base output directory (default: {default_config.output_path})",
     )
 
     parser.add_argument(
         "-a",
         "--artworks-dir",
         type=str,
-        default=Config.__dataclass_fields__["artworks_directory"].default,
-        help=f"Subdirectory for artworks, empty for album directory (default: {Config.__dataclass_fields__['artworks_directory'].default})",
+        default=default_config.artworks_directory,
+        help=f"Subdirectory for artworks, empty for album directory (default: {default_config.artworks_directory})",
     )
 
     parser.add_argument(
         "-c",
         "--concurrency",
         type=int,
-        default=Config.__dataclass_fields__["max_concurrency"].default,
-        help=f"Maximum concurrent downloads (default: {Config.__dataclass_fields__['max_concurrency'].default})",
+        default=default_config.max_concurrency,
+        help=f"Maximum concurrent downloads (default: {default_config.max_concurrency})",
     )
 
     parser.add_argument(
         "-r",
         "--rate-limit",
         type=float,
-        default=Config.__dataclass_fields__["rate_limit"].default,
-        help=f"Global rate limit in requests per second (default: {Config.__dataclass_fields__['rate_limit'].default})",
+        default=default_config.rate_limit,
+        help=f"Global rate limit in requests per second (default: {default_config.rate_limit})",
     )
 
     parser.add_argument(
         "-j",
         "--jitter",
         type=float,
-        default=Config.__dataclass_fields__["jitter_percent"].default,
-        help=f"Jitter as percentage of base delay (default: {Config.__dataclass_fields__['jitter_percent'].default}%%)",
+        default=default_config.jitter_percent,
+        help=f"Jitter as percentage of base delay (default: {default_config.jitter_percent}%%)",
     )
 
     parser.add_argument(
         "-s",
         "--chunk-size",
         type=int,
-        default=Config.__dataclass_fields__["chunk_size"].default,
-        help=f"Chunk size in bytes, 0 for single write (default: {Config.__dataclass_fields__['chunk_size'].default})",
+        default=default_config.chunk_size,
+        help=f"Chunk size in bytes, 0 for single write (default: {default_config.chunk_size})",
     )
 
     parser.add_argument(
         "-m",
         "--max-retries",
         type=int,
-        default=Config.__dataclass_fields__["max_retries"].default,
-        help=f"Maximum retry attempts (default: {Config.__dataclass_fields__['max_retries'].default})",
+        default=default_config.max_retries,
+        help=f"Maximum retry attempts (default: {default_config.max_retries})",
     )
 
     parser.add_argument(
@@ -1570,15 +1568,15 @@ Examples:
         "--html-parser",
         type=str,
         choices=["html.parser", "lxml", "html5lib"],
-        help=f"HTML parser to use (default: {default_html_parser})",
+        help=f"HTML parser to use (default: {default_config.html_parser})",
     )
 
     parser.add_argument(
         "-f",
         "--formats",
         type=lambda s: [f.strip().lower() for f in s.split(",")],
-        default=default_preferred_formats,
-        help=f"Preferred formats in order (default: {','.join(default_preferred_formats)})",
+        default=default_config.preferred_formats,
+        help=f"Preferred formats in order (default: {','.join(default_config.preferred_formats)})",
     )
 
     parser.add_argument(
@@ -1594,8 +1592,8 @@ Examples:
         "--padding-mode",
         type=str,
         choices=["disc", "total"],
-        default=Config.__dataclass_fields__["padding_mode"].default,
-        help=f"Padding mode for multi-disc albums: 'disc' (per-disc padding) or 'total' (total track count padding) (default: {Config.__dataclass_fields__['padding_mode'].default})",
+        default=default_config.padding_mode,
+        help=f"Padding mode for multi-disc albums: 'disc' (per-disc padding) or 'total' (total track count padding) (default: {default_config.padding_mode})",
     )
 
     parser.add_argument(
@@ -1616,7 +1614,9 @@ Examples:
             jitter_percent=args.jitter,
             chunk_size=args.chunk_size if args.chunk_size != 0 else None,
             max_retries=args.max_retries,
-            html_parser=args.html_parser if args.html_parser else default_html_parser,
+            html_parser=(
+                args.html_parser if args.html_parser else default_config.html_parser
+            ),
             preferred_formats=tuple(args.formats),
             track_padding=args.track_padding,
             padding_mode=args.padding_mode,
