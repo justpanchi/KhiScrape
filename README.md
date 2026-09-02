@@ -105,7 +105,7 @@ khiscrape \
 | `-c, --concurrency NUM` | Concurrent downloads | `4` |
 | `-r, --rate-limit RPS` | Requests per second | `2.0` |
 | `-j, --jitter JITTER` | Jitter as percentage of base delay | `70%` |
-| `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `524288` (512KiB) |
+| `-s, --chunk-size BYTES` | Chunk size (0 = single write) | `2097152` (2 MiB) |
 | `-m, --max-retries NUM` | Retry attempts | `3` |
 | `-f, --formats LIST` | Preferred formats in order | `flac,wav,m4a,opus,ogg,aac,mp3` |
 | `-b, --html-parser PARSER` | HTML parser to use (`lxml`, `html.parser`, `html5lib`) | `lxml` (fallback: `html.parser`) |
