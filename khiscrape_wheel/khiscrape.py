@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Asynchronous Khinsider Music Downloader"""
 
-__version__ = "0.2026.09.26.0"
+__version__ = "0.2026.09.26.1"
 
 import argparse
 import asyncio
@@ -63,7 +63,7 @@ class Config:
     user_agent: str = field(
         default=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/143.0.7499.40 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/153.0.8010.37 Safari/537.36"
         )
     )
     base_album_url: str = "https://downloads.khinsider.com/game-soundtracks/album/"
@@ -509,8 +509,8 @@ class BaseDownloader:
             "Accept": "text/html;q=1.0,*/*;q=0.9",
             "Accept-Language": "en-US;q=1.0,en;q=0.9",
             "Accept-Encoding": "identity;q=1.0,gzip;q=0.9,deflate;q=0.8,br;q=0.7",
-            "DNT": "1",
             "Connection": "keep-alive",
+            "DNT": "1",
             "Upgrade-Insecure-Requests": "1",
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
