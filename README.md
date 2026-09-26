@@ -100,7 +100,7 @@ khiscrape \
 | Option | Description | Default |
 |--------|-------------|---------|
 | `urls` | Album URLs or IDs to download (required) | - |
-| `-o, --output PATH` | Output directory | `KhiScrape` |
+| `-o, --output PATH` | Output directory (empty = current directory) | `KhiScrape` |
 | `-a, --artworks-dir DIR` | Subdirectory for artworks (empty = no subdirectory) | `Artworks` |
 | `-c, --concurrency NUM` | Concurrent downloads | `4` |
 | `-r, --rate-limit RPS` | Requests per second | `2.0` |
