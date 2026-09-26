@@ -12,8 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiofiles
-import aiohttp
-from aiohttp import ClientTimeout, TCPConnector
+from aiohttp import ClientResponse, ClientSession, ClientTimeout, TCPConnector
 from bs4 import BeautifulSoup
 from colorama import Fore, Style, init
 from yarl import URL
@@ -38,7 +37,7 @@ except ImportError:
 class Config:
     """Immutable configuration container."""
 
-    output_path: Path = Path("KhiScrape")
+    output_path: Path = Path("KhiScrape")  # Empty string = current directory
     artworks_directory: str = "Artworks"  # Empty string = no subdirectory
     max_name_bytes: int = 255
     invalid_chars_pattern: str = r'[\\/*?:"<>|]'
@@ -321,7 +320,7 @@ class TrackInfo:
     """Information about a single track."""
 
     number: int
-    name: str
+    title: str
     page_url: str
     disc_number: int | None = None
     download_url: str | None = None
@@ -333,7 +332,7 @@ class TrackInfo:
 class ArtworkInfo:
     """Information about a single artwork."""
 
-    url: str
+    download_url: str
     filename: str
     file_size: int = 0
 
@@ -394,6 +393,22 @@ class ColorFormatter(logging.Formatter):
 
         message = super().format(record)
         return f"{color}{prefix}{Style.RESET_ALL} {message}"
+
+
+def _emit_report_lines(logger: logging.Logger, lines: list[tuple[str, ...]]) -> None:
+    """Log a sequence of separator, header, and key/value report lines."""
+    for line in lines:
+        if len(line) == 2:
+            text, line_type = line
+            if line_type == "separator":
+                logger.info(text, extra={"separator": True})
+            elif line_type == "header":
+                logger.info(text, extra={"header": True})
+            else:
+                logger.info(text)
+        else:  # key_value
+            key, value, line_type = line
+            logger.info("", extra={"key_value": True, "key": key, "value": value})
 
 
 def setup_logging(
@@ -506,11 +521,11 @@ class BaseDownloader:
 
     async def _make_request(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         url: str,
         referer: str | None = None,
         method: str = "GET",
-    ) -> aiohttp.ClientResponse | None:
+    ) -> ClientResponse | None:
         """Make an HTTP request with rate limiting and error handling."""
         await self.rate_limiter.acquire()
 
@@ -553,7 +568,7 @@ class BaseDownloader:
 
     async def _get_remote_file_size(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         download_url: str,
         referer: str,
         item: TrackInfo | ArtworkInfo,
@@ -577,7 +592,7 @@ class BaseDownloader:
 
     async def _download_file(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         download_url: str,
         file_path: Path,
         referer: str,
@@ -587,13 +602,15 @@ class BaseDownloader:
         generic_context = DownloadContext.get_generic_context(item)
         specific_context = self._get_specific_context(item)
 
-        local_size = 0
-        file_exists = file_path.exists()
-        if file_exists:
+        try:
             local_size = file_path.stat().st_size
+            file_exists = True
             self.logger.debug(
                 f"{specific_context}: Local file exists with size: {local_size} bytes"
             )
+        except FileNotFoundError:
+            local_size = 0
+            file_exists = False
 
         # For existing files, we need to check remote size first using HEAD
         remote_size = None
@@ -603,6 +620,7 @@ class BaseDownloader:
             )
             if remote_size is not None:
                 if local_size == remote_size:
+                    item.file_size = local_size
                     self.logger.info(
                         f"{generic_context} already exists with correct size: {file_path.name}"
                     )
@@ -657,16 +675,16 @@ class BaseDownloader:
                             # Single write
                             content = await response.read()
                             await f.write(content)
+                            actual_size = len(content)
                         else:
                             # Chunked write
-                            total_downloaded = 0
+                            actual_size = 0
                             async for chunk in response.content.iter_chunked(
                                 self.config.chunk_size
                             ):
                                 await f.write(chunk)
-                                total_downloaded += len(chunk)
+                                actual_size += len(chunk)
 
-                    actual_size = temp_path.stat().st_size
                     if (
                         content_length
                         and content_length > 0
@@ -677,6 +695,7 @@ class BaseDownloader:
                         )
 
                     temp_path.rename(file_path)
+                    item.file_size = actual_size
 
                     if file_exists:
                         self.logger.info(
@@ -690,8 +709,7 @@ class BaseDownloader:
 
             except Exception as e:
                 # Clean up temp file on error
-                if temp_path.exists():
-                    temp_path.unlink()
+                temp_path.unlink(missing_ok=True)
 
                 if attempt < self.config.max_retries:
                     wait_time = 2**attempt
@@ -739,7 +757,7 @@ class ArtworkDownloader(BaseDownloader):
 
                     filename = PathSanitizer.sanitize_url_filename(img_url, self.config)
 
-                    artwork = ArtworkInfo(url=img_url, filename=filename)
+                    artwork = ArtworkInfo(download_url=img_url, filename=filename)
                     artworks.append(artwork)
                     self.logger.debug(f"Found artwork: {filename} -> {img_url}")
 
@@ -752,7 +770,7 @@ class ArtworkDownloader(BaseDownloader):
 
     async def _download_artwork(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         artwork: ArtworkInfo,
         album_url: str,
         artwork_dir: Path,
@@ -766,12 +784,12 @@ class ArtworkDownloader(BaseDownloader):
             )
             file_path = artwork_dir / final_name
             return await self._download_file(
-                session, artwork.url, file_path, album_url, artwork
+                session, artwork.download_url, file_path, album_url, artwork
             )
 
     async def download_artworks(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         artworks: list[ArtworkInfo],
         album_url: str,
         album_dir: Path,
@@ -930,10 +948,10 @@ class TrackDownloader(BaseDownloader):
             formatted_track = self._format_track_number(track.number, track_padding)
             if track.disc_number is not None:
                 track_entries.append(
-                    f"{track.disc_number}-{formatted_track}. {track.name}"
+                    f"{track.disc_number}-{formatted_track}. {track.title}"
                 )
             else:
-                track_entries.append(f"{formatted_track}. {track.name}")
+                track_entries.append(f"{formatted_track}. {track.title}")
 
         tracklist_text = "\n".join(track_entries)
         self.logger.info(f"({len(tracks)} tracks):", extra={"tracklist": True})
@@ -1029,12 +1047,16 @@ class TrackDownloader(BaseDownloader):
                     track_name_cell = cells[3]
 
                     disc_text = disc_cell.get_text().strip()
-                    if disc_text and disc_text.isdigit():
+                    try:
                         disc_number = int(disc_text)
+                    except ValueError:
+                        pass
 
                     track_number_text = track_number_cell.get_text().strip().rstrip(".")
-                    if track_number_text and track_number_text.isdigit():
+                    try:
                         track_number = int(track_number_text)
+                    except ValueError:
+                        pass
 
                 elif has_track_numbers and len(cells) > 2:
                     # Structure: [play, track_num, name, ...]
@@ -1042,8 +1064,10 @@ class TrackDownloader(BaseDownloader):
                     track_name_cell = cells[2]
 
                     track_number_text = track_number_cell.get_text().strip().rstrip(".")
-                    if track_number_text and track_number_text.isdigit():
+                    try:
                         track_number = int(track_number_text)
+                    except ValueError:
+                        pass
 
                 elif len(cells) > 1:
                     # Structure: [play, name, ...] - no disc or track numbers
@@ -1075,7 +1099,7 @@ class TrackDownloader(BaseDownloader):
                 if track_name and track_url:
                     track = TrackInfo(
                         number=track_number,
-                        name=track_name,
+                        title=track_name,
                         page_url=track_url,
                         disc_number=disc_number,
                     )
@@ -1090,7 +1114,7 @@ class TrackDownloader(BaseDownloader):
         return tracks
 
     async def _get_download_info(
-        self, session: aiohttp.ClientSession, track: TrackInfo, album_url: str
+        self, session: ClientSession, track: TrackInfo, album_url: str
     ) -> bool:
         """Get the best available download URL for a track."""
         specific_context = self._get_specific_context(track)
@@ -1144,7 +1168,7 @@ class TrackDownloader(BaseDownloader):
 
     async def _download_track(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         track: TrackInfo,
         album_url: str,
         album_dir: Path,
@@ -1162,7 +1186,7 @@ class TrackDownloader(BaseDownloader):
                 track.disc_number, 3
             )  # Default to 3 if not found
             sanitized_name = self._sanitize_track_filename(
-                track.name,
+                track.title,
                 track_number=track.number,
                 disc_number=track.disc_number,
                 padding=track_padding,
@@ -1176,7 +1200,7 @@ class TrackDownloader(BaseDownloader):
 
     async def download_tracks(
         self,
-        session: aiohttp.ClientSession,
+        session: ClientSession,
         tracks: list[TrackInfo],
         album_url: str,
         album_dir: Path,
@@ -1383,20 +1407,7 @@ class KhinsiderDownloader:
             lines.append(("Padding Mode", self.config.padding_mode, "key_value"))
         lines.append(("=" * 60, "separator"))
 
-        for line in lines:
-            if len(line) == 2:
-                text, line_type = line
-                if line_type == "separator":
-                    self.logger.info(text, extra={"separator": True})
-                elif line_type == "header":
-                    self.logger.info(text, extra={"header": True})
-                else:
-                    self.logger.info(text)
-            else:  # key_value
-                key, value, line_type = line
-                self.logger.info(
-                    "", extra={"key_value": True, "key": key, "value": value}
-                )
+        _emit_report_lines(self.logger, lines)
 
     async def download_album(self, album_input: str) -> bool:
         """Download all artworks and tracks from an album."""
@@ -1404,7 +1415,7 @@ class KhinsiderDownloader:
         self.logger.info(f"Processing album: {album_url}")
 
         connector = TCPConnector(limit=self.config.max_concurrency * 2)
-        async with aiohttp.ClientSession(
+        async with ClientSession(
             connector=connector, headers=self.artwork_downloader.headers
         ) as session:
             response = await self.artwork_downloader._make_request(
@@ -1474,11 +1485,14 @@ class KhinsiderDownloader:
                 session, tracks, album_url, album_dir, padding_dict
             )
 
-            total_success = artwork_success + track_success
             total_failed = artwork_failed + track_failed
+            total_size = sum(track.file_size for track in tracks) + sum(
+                artwork.file_size for artwork in artworks
+            )
 
             self.logger.info(
                 f"Album completed: {track_success}/{len(tracks)} tracks, {artwork_success}/{len(artworks)} artworks downloaded successfully"
+                f" ({total_size / 1024 / 1024:.1f} MiB)"
             )
             if total_failed > 0:
                 self.logger.warning(f"{total_failed} items failed to download")
@@ -1512,7 +1526,7 @@ Examples:
         "--output",
         type=Path,
         default=default_config.output_path,
-        help=f"Base output directory (default: {default_config.output_path})",
+        help=f"Base output directory, empty for current directory (default: {default_config.output_path})",
     )
 
     parser.add_argument(
@@ -1623,7 +1637,7 @@ Examples:
             debug=args.debug,
         )
     except ValueError as e:
-        print(f"{Fore.RED}Configuration error: {e}", file=sys.stderr)
+        logger.error(f"Configuration error: {e}")
         sys.exit(1)
 
     # Pass the configured logger to the downloader
@@ -1647,18 +1661,7 @@ Examples:
     )
     summary_lines.append(("=" * 60, "separator"))
 
-    for line in summary_lines:
-        if len(line) == 2:
-            text, line_type = line
-            if line_type == "separator":
-                logger.info(text, extra={"separator": True})
-            elif line_type == "header":
-                logger.info(text, extra={"header": True})
-            else:
-                logger.info(text)
-        else:  # key_value
-            key, value, line_type = line
-            logger.info("", extra={"key_value": True, "key": key, "value": value})
+    _emit_report_lines(logger, summary_lines)
 
 
 if __name__ == "__main__":
